@@ -1,0 +1,3 @@
+fromBinary() {
+    printf "%s\n" "$((2#$1))"
+}

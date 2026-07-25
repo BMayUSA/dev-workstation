@@ -1,0 +1,5 @@
+listening() {
+lsof -i -n -P | grep --color=auto \
+--exclude-dir={.bzr,CVS,.git,.hg,.svn,.idea,.tox} TCP | \
+grep --color=auto --exclude-dir={.bzr,CVS,.git,.hg,.svn,.idea,.tox} LISTEN
+}

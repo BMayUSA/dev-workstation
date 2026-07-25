@@ -1,0 +1,333 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+ ~ deleGATOR ~
+
+             _.'^^'.
+  _      _.-' ((@)) '.   ./\/\/\/\/\/\,.---.__
+..'o'...-'      ~~~    '~/\/\/\/\/\/\__.---.   `-._
+:                          /\/\/\/\,-'              `-.__
+^VvvvvvvvvvvVvVv                   |                     `-._
+  ;^^^^^^^^^^^`      /             `\        /               `-._
+   ```````````````'.`                `\     (                    `'-._
+            .-----'`   /\              `\    )--.______.______._______`/
+           (((------'``  `'--------'`(((----'
+------------------------------------------------
+
+Usage:
+  delegator [--color <color>] [--prompt <prompt>] <branch> [worktree-parent]
+  delegator --cleanup <branch>
+
+Create or reuse a Git worktree and start a detached tmux session with two
+side-by-side panes rooted in that worktree.
+
+The worktree directory and tmux session are named from the branch:
+
+  feature/my-thing  ->  feature-my-thing
+
+If worktree-parent is omitted, this directory is used:
+
+  ${TMPDIR:-/tmp}/delegator-worktrees
+
+Color sets the tmux active pane style and other session indicators.
+
+Examples:
+  delegator feature/my-thing ../worktrees
+  delegator feature/my-thing ../worktrees "Implement the feature"
+  delegator --cleanup feature/my-thing
+
+Cleanup removes the worktree and kills its tmux session. It does not delete
+the Git branch. Worktrees with uncommitted or untracked files are not removed.
+EOF
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+find_worktree_for_branch() {
+  local current_worktree=
+  local line=
+
+  while IFS= read -r line; do
+    case $line in
+      "worktree "*)
+        current_worktree=${line#worktree }
+        ;;
+      "branch refs/heads/$branch")
+        printf '%s\n' "$current_worktree"
+        return 0
+        ;;
+      "")
+        current_worktree=
+        ;;
+    esac
+  done < <(git -C "$git_root" worktree list --porcelain)
+
+  return 1
+}
+
+print_session_info() {
+  local worktree=$1
+
+  printf 'Worktree: %s\n' "$worktree"
+  printf 'Session:  %s\n' "$session_name"
+  printf 'Attach:   tmux attach-session -t %q\n' "$session_name"
+}
+
+if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+cleanup=false
+prompt=
+color=green
+prompt_set=false
+positional=()
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+
+    --cleanup)
+      [[ $cleanup == false ]] ||
+        die "--cleanup may only be supplied once"
+
+      cleanup=true
+      shift
+      ;;
+
+    --color)
+      color=$2
+      shift 2
+      ;;
+
+    --color=*)
+      color=${1#--color=}
+      shift
+      ;;
+
+    --prompt)
+      [[ $prompt_set == false ]] ||
+        die "--prompt may only be supplied once"
+
+      [[ $# -ge 2 ]] ||
+        die "--prompt requires a value"
+
+      prompt=$2
+      prompt_set=true
+      shift 2
+      ;;
+
+    --prompt=*)
+      [[ $prompt_set == false ]] ||
+        die "--prompt may only be supplied once"
+
+      prompt=${1#--prompt=}
+      prompt_set=true
+      shift
+      ;;
+
+    --)
+      shift
+      positional+=("$@")
+      break
+      ;;
+
+    -*)
+      die "unknown option: $1"
+      ;;
+
+    *)
+      positional+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ $cleanup == true ]]; then
+  [[ $prompt_set == false ]] ||
+    die "--prompt cannot be used with --cleanup"
+
+  [[ ${#positional[@]} -eq 1 ]] || {
+    usage >&2
+    exit 2
+  }
+
+  branch=${positional[0]}
+else
+  [[ ${#positional[@]} -ge 1 && ${#positional[@]} -le 2 ]] || {
+    usage >&2
+    exit 2
+  }
+
+  branch=${positional[0]}
+
+  if [[ ${#positional[@]} -eq 2 ]]; then
+    worktree_parent=${positional[1]}
+  else
+    worktree_parent="${TMPDIR:-/tmp}/delegator-worktrees"
+  fi
+fi
+
+command -v git >/dev/null 2>&1 ||
+  die "git is not installed or not on PATH"
+
+command -v tmux >/dev/null 2>&1 ||
+  die "tmux is not installed or not on PATH"
+
+git_root=$(git rev-parse --show-toplevel 2>/dev/null) ||
+  die "run this command from inside a Git repository"
+
+git check-ref-format --branch "$branch" >/dev/null 2>&1 ||
+  die "invalid branch name: $branch"
+
+# Slashes are valid in Git branches but unsuitable for worktree directory names.
+# Colons and periods are also replaced because tmux uses them in target syntax.
+session_name=${branch//\//-}
+session_name=${session_name//:/-}
+session_name=${session_name//./-}
+
+session_exists=false
+recorded_branch=
+recorded_worktree=
+
+if tmux has-session -t "=$session_name" 2>/dev/null; then
+  session_exists=true
+
+  # These metadata fields are set on sessions created by this version of the
+  # script. Missing fields are allowed so existing sessions remain usable.
+  recorded_branch=$(
+    tmux show-options -t "$session_name" -v @delegator_branch 2>/dev/null ||
+      true
+  )
+  recorded_worktree=$(
+    tmux show-options -t "$session_name" -v @delegator_worktree 2>/dev/null ||
+      true
+  )
+
+  if [[ -n $recorded_branch && $recorded_branch != "$branch" ]]; then
+    die "tmux name collision: $session_name belongs to branch $recorded_branch"
+  fi
+fi
+
+existing_worktree=
+if existing_worktree=$(find_worktree_for_branch); then
+  :
+fi
+
+if [[ $cleanup == true ]]; then
+  if [[ -n $existing_worktree ]]; then
+    if [[ $existing_worktree == "$git_root" ]]; then
+      die "refusing to remove the current worktree; run cleanup from another worktree"
+    fi
+
+    # Deliberately omit --force. Git will protect worktrees containing
+    # uncommitted changes or untracked files.
+    git -C "$git_root" worktree remove "$existing_worktree"
+    printf 'Removed worktree: %s\n' "$existing_worktree"
+  else
+    printf 'No worktree found for branch: %s\n' "$branch"
+  fi
+
+  if [[ $session_exists == true ]]; then
+    tmux kill-session -t "$session_name"
+    printf 'Killed session:   %s\n' "$session_name"
+  else
+    printf 'No tmux session found: %s\n' "$session_name"
+  fi
+
+  exit 0
+fi
+
+# Reuse an already-running session instead of generating a suffixed name.
+if [[ $session_exists == true ]]; then
+  if [[ -n $recorded_worktree ]]; then
+    existing_worktree=$recorded_worktree
+  elif [[ -z $existing_worktree ]]; then
+    existing_worktree=$(
+      tmux display-message -p -t "$session_name" \
+        '#{pane_current_path}'
+    )
+  fi
+
+  printf 'Session already running.\n'
+  print_session_info "$existing_worktree"
+  exit 0
+fi
+
+if [[ -n $existing_worktree ]]; then
+  # The worktree may remain after its previous tmux session was closed.
+  worktree_directory=$existing_worktree
+else
+  mkdir -p "$worktree_parent"
+  worktree_directory="${worktree_parent%/}/$session_name"
+
+  if git -C "$git_root" show-ref \
+    --verify --quiet "refs/heads/$branch"; then
+    git -C "$git_root" worktree add \
+      "$worktree_directory" "$branch"
+  else
+    git -C "$git_root" worktree add \
+      -b "$branch" "$worktree_directory"
+  fi
+fi
+
+# Resolve the canonical absolute path before handing it to the tmux server.
+worktree_directory=$(
+  git -C "$worktree_directory" rev-parse --show-toplevel
+)
+
+creation_info=$(
+  tmux new-session -d -P \
+    -F '#{window_id} #{pane_id}' \
+    -s "$session_name" \
+    -c "$worktree_directory"
+)
+
+read -r window_id pane_one_id <<<"$creation_info"
+
+pane_two_id=$(
+  tmux split-window -d -h -P \
+    -F '#{pane_id}' \
+    -t "$pane_one_id" \
+    -c "$worktree_directory"
+)
+
+tmux select-layout -t "$window_id" even-horizontal >/dev/null
+
+# Record ownership so sanitized-name collisions can be detected.
+tmux set-option -t "$session_name" \
+  @delegator_branch "$branch"
+
+tmux set-option -t "$session_name" \
+  @delegator_worktree "$worktree_directory"
+
+tmux set-option -t "$session_name" pane-active-border-style "fg=$color"
+tmux set -t "$session_name" status-style "bg=$color,fg=black"
+
+printf -v pane_one_command \
+  'printf "Welcome\!\\nBranch: %%s\\n" %q' "$branch"
+
+if [[ -n $prompt ]]; then
+  printf -v pane_two_command 'codex exec -- %q' "$prompt"
+else
+  pane_two_command=codex
+fi
+
+tmux send-keys -t "$pane_one_id" -l "$pane_one_command"
+tmux send-keys -t "$pane_one_id" Enter
+
+tmux send-keys -t "$pane_two_id" -l "$pane_two_command"
+tmux send-keys -t "$pane_two_id" Enter
+
+tmux select-pane -t "$pane_one_id"
+
+print_session_info "$worktree_directory"

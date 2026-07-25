@@ -1,0 +1,9 @@
+toBinary() {
+    n="$1"
+    bit="" 
+    while [ "$n" -gt 0 ]; do
+        bit="$(( n&1 ))$bit";
+        : $(( n >>= 1 ))
+    done
+    printf "%s\n" "$bit"
+}
