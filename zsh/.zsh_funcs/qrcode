@@ -1,5 +1,5 @@
 qrcode() {
-    local URL="${1:-$(pbpaste)}"
-    echo "$URL"
-    curl "qrcode.show/$URL"
+    local INPUT="${1:-$(pbpaste)}"
+    echo "$INPUT"
+    qrencode -o - -t ANSI "$INPUT"
 }
