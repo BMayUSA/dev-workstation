@@ -3,7 +3,7 @@
 # export PATH=$HOME/bin:/usr/local/bin:$PATH
 
 # Path to your oh-my-zsh installation.
-export ZSH="/Users/brianmay/.oh-my-zsh"
+export ZSH="$HOME/.oh-my-zsh"
 
 # Set name of the theme to load --- if set to "random", it will
 # load a random theme each time oh-my-zsh is loaded, in which case,
@@ -131,13 +131,13 @@ ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=red'
 
 
 # Updates PATH for the Google Cloud SDK.
-if [ -f '/Users/brianmay/tools/google-cloud-sdk/path.zsh.inc' ]; then . '/Users/brianmay/tools/google-cloud-sdk/path.zsh.inc'; fi
+if [ -f '$HOME/tools/google-cloud-sdk/path.zsh.inc' ]; then . '$HOME/tools/google-cloud-sdk/path.zsh.inc'; fi
 # Enables shell command completion for gcloud.
-if [ -f '/Users/brianmay/tools/google-cloud-sdk/completion.zsh.inc' ]; then . '/Users/brianmay/tools/google-cloud-sdk/completion.zsh.inc'; fi
+if [ -f '$HOME/tools/google-cloud-sdk/completion.zsh.inc' ]; then . '$HOME/tools/google-cloud-sdk/completion.zsh.inc'; fi
 
 . "$HOME/.local/bin/env"
 # Enable Docker CLI completions.
-fpath=(/Users/brianmay/.docker/completions $fpath)
+fpath=($HOME/.docker/completions $fpath)
 
 
 # fzf for shell history search
