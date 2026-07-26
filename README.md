@@ -18,5 +18,5 @@ Minimize distractions and parallelize agentic workflows.
 
 ### Custom Utilities
 
-- Delegator
+- Delegator - Used for quickly spinning up a fresh tmux session and git worktree for parallelizing agent tasks.
 
