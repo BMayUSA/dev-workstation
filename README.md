@@ -19,4 +19,4 @@ Minimize distractions and parallelize agentic workflows.
 ### Custom Utilities
 
 - Delegator - Used for quickly spinning up a fresh tmux session and git worktree for parallelizing agent tasks.
-
+- Codex Agents - Live terminal dashboard for Codex session and subagent status.

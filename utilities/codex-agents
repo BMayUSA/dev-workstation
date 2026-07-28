@@ -1,0 +1,998 @@
+#!/usr/bin/env python3
+"""A lightweight terminal dashboard for Codex agent lifecycle hooks."""
+
+from __future__ import annotations
+
+import argparse
+import curses
+import json
+import os
+import sqlite3
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Iterable
+
+
+EVENT_LIMIT = 1000
+STALE_AFTER_SECONDS = 6 * 60 * 60
+STATE_PRIORITY = {
+    "waiting_for_approval": 0,
+    "working": 1,
+    "waiting_on_agents": 2,
+    "compacting": 3,
+    "idle": 4,
+    "stale": 5,
+    "done": 6,
+    "abandoned": 7,
+    "ended": 8,
+}
+STATE_LABELS = {
+    "waiting_for_approval": "waiting approval",
+    "waiting_on_agents": "waiting agents",
+}
+STATE_SYMBOLS = {
+    "working": "●",
+    "waiting_for_approval": "◐",
+    "waiting_on_agents": "◐",
+    "compacting": "◌",
+    "idle": "○",
+    "stale": "!",
+    "done": "✓",
+    "abandoned": "!",
+    "ended": "·",
+}
+ANSI_COLORS = {
+    "working": "\033[32m",
+    "waiting_for_approval": "\033[33m",
+    "waiting_on_agents": "\033[33m",
+    "compacting": "\033[36m",
+    "idle": "\033[36m",
+    "stale": "\033[31m",
+    "done": "\033[34m",
+    "abandoned": "\033[31m",
+    "ended": "\033[90m",
+}
+ANSI_RESET = "\033[0m"
+
+
+def database_path() -> Path:
+    override = os.environ.get("CODEX_AGENTS_DB")
+    if override:
+        return Path(override).expanduser()
+
+    state_home = os.environ.get("XDG_STATE_HOME")
+    base = Path(state_home).expanduser() if state_home else Path.home() / ".local/state"
+    return base / "codex-agents/status.sqlite3"
+
+
+def connect_database() -> sqlite3.Connection:
+    path = database_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    connection = sqlite3.connect(path, timeout=0.4)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 400")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = NORMAL")
+    connection.execute("PRAGMA foreign_keys = ON")
+    initialize_schema(connection)
+
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+    return connection
+
+
+def initialize_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id TEXT PRIMARY KEY,
+            cwd TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            turn_id TEXT,
+            state TEXT NOT NULL DEFAULT 'idle',
+            started_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            ended_at REAL,
+            last_event TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS agents (
+            session_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            agent_type TEXT NOT NULL DEFAULT '',
+            turn_id TEXT,
+            state TEXT NOT NULL DEFAULT 'working',
+            started_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            ended_at REAL,
+            last_event TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (session_id, agent_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at REAL NOT NULL,
+            event_name TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            turn_id TEXT,
+            agent_id TEXT,
+            agent_type TEXT,
+            cwd TEXT NOT NULL DEFAULT '',
+            state TEXT,
+            detail TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE INDEX IF NOT EXISTS agents_state_idx
+            ON agents(state, updated_at);
+        CREATE INDEX IF NOT EXISTS events_created_idx
+            ON events(created_at);
+        """
+    )
+
+
+def text_field(payload: dict[str, Any], name: str) -> str:
+    value = payload.get(name)
+    return value if isinstance(value, str) else ""
+
+
+def event_detail(payload: dict[str, Any], event_name: str) -> str:
+    if event_name == "SessionStart":
+        return text_field(payload, "source")
+    if event_name == "SessionEnd":
+        return text_field(payload, "reason")
+    if event_name in {"PreCompact", "PostCompact"}:
+        return text_field(payload, "trigger")
+    if event_name in {"PreToolUse", "PostToolUse", "PermissionRequest"}:
+        return text_field(payload, "tool_name")
+    return ""
+
+
+def session_state_for(payload: dict[str, Any], event_name: str) -> str | None:
+    direct_states = {
+        "SessionStart": "idle",
+        "SessionEnd": "ended",
+        "UserPromptSubmit": "working",
+        "PermissionRequest": "waiting_for_approval",
+        "PreCompact": "compacting",
+        "PostCompact": "working",
+        "SubagentStart": "working",
+        "Stop": "idle",
+    }
+    if event_name in direct_states:
+        return direct_states[event_name]
+
+    tool_name = text_field(payload, "tool_name")
+    if tool_name == "wait_agent":
+        if event_name == "PreToolUse":
+            return "waiting_on_agents"
+        if event_name == "PostToolUse":
+            return "working"
+
+    return None
+
+
+def ingest_payload(payload: dict[str, Any]) -> None:
+    event_name = text_field(payload, "hook_event_name")
+    session_id = text_field(payload, "session_id")
+    if not event_name or not session_id:
+        return
+
+    now = time.time()
+    cwd = text_field(payload, "cwd")
+    model = text_field(payload, "model")
+    turn_id = text_field(payload, "turn_id") or None
+    agent_id = text_field(payload, "agent_id") or None
+    agent_type = text_field(payload, "agent_type")
+    state = session_state_for(payload, event_name)
+    event_state = {
+        "SubagentStart": "working",
+        "SubagentStop": "done",
+    }.get(event_name, state)
+
+    connection = connect_database()
+    try:
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO sessions (
+                    session_id, cwd, model, turn_id, state,
+                    started_at, updated_at, ended_at, last_event
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    cwd = CASE
+                        WHEN excluded.cwd <> '' THEN excluded.cwd
+                        ELSE sessions.cwd
+                    END,
+                    model = CASE
+                        WHEN excluded.model <> '' THEN excluded.model
+                        ELSE sessions.model
+                    END,
+                    turn_id = COALESCE(excluded.turn_id, sessions.turn_id),
+                    state = CASE
+                        WHEN ? IS NOT NULL THEN excluded.state
+                        ELSE sessions.state
+                    END,
+                    updated_at = excluded.updated_at,
+                    ended_at = CASE
+                        WHEN ? = 'ended' THEN excluded.ended_at
+                        WHEN ? IS NOT NULL THEN NULL
+                        ELSE sessions.ended_at
+                    END,
+                    last_event = excluded.last_event
+                """,
+                (
+                    session_id,
+                    cwd,
+                    model,
+                    turn_id,
+                    state or "idle",
+                    now,
+                    now,
+                    now if state == "ended" else None,
+                    event_name,
+                    state,
+                    state,
+                    state,
+                ),
+            )
+
+            if event_name == "SubagentStart" and agent_id:
+                connection.execute(
+                    """
+                    INSERT INTO agents (
+                        session_id, agent_id, agent_type, turn_id, state,
+                        started_at, updated_at, ended_at, last_event
+                    )
+                    VALUES (?, ?, ?, ?, 'working', ?, ?, NULL, ?)
+                    ON CONFLICT(session_id, agent_id) DO UPDATE SET
+                        agent_type = CASE
+                            WHEN excluded.agent_type <> '' THEN excluded.agent_type
+                            ELSE agents.agent_type
+                        END,
+                        turn_id = COALESCE(excluded.turn_id, agents.turn_id),
+                        state = 'working',
+                        updated_at = excluded.updated_at,
+                        ended_at = NULL,
+                        last_event = excluded.last_event
+                    """,
+                    (
+                        session_id,
+                        agent_id,
+                        agent_type,
+                        turn_id,
+                        now,
+                        now,
+                        event_name,
+                    ),
+                )
+            elif event_name == "SubagentStop" and agent_id:
+                connection.execute(
+                    """
+                    INSERT INTO agents (
+                        session_id, agent_id, agent_type, turn_id, state,
+                        started_at, updated_at, ended_at, last_event
+                    )
+                    VALUES (?, ?, ?, ?, 'done', ?, ?, ?, ?)
+                    ON CONFLICT(session_id, agent_id) DO UPDATE SET
+                        agent_type = CASE
+                            WHEN excluded.agent_type <> '' THEN excluded.agent_type
+                            ELSE agents.agent_type
+                        END,
+                        turn_id = COALESCE(excluded.turn_id, agents.turn_id),
+                        state = 'done',
+                        updated_at = excluded.updated_at,
+                        ended_at = excluded.ended_at,
+                        last_event = excluded.last_event
+                    """,
+                    (
+                        session_id,
+                        agent_id,
+                        agent_type,
+                        turn_id,
+                        now,
+                        now,
+                        now,
+                        event_name,
+                    ),
+                )
+
+            if event_name == "SessionEnd":
+                connection.execute(
+                    """
+                    UPDATE agents
+                    SET state = 'abandoned',
+                        updated_at = ?,
+                        ended_at = ?,
+                        last_event = 'SessionEnd'
+                    WHERE session_id = ?
+                      AND state NOT IN ('done', 'abandoned')
+                    """,
+                    (now, now, session_id),
+                )
+
+            connection.execute(
+                """
+                INSERT INTO events (
+                    created_at, event_name, session_id, turn_id,
+                    agent_id, agent_type, cwd, state, detail
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    event_name,
+                    session_id,
+                    turn_id,
+                    agent_id,
+                    agent_type or None,
+                    cwd,
+                    event_state,
+                    event_detail(payload, event_name),
+                ),
+            )
+            connection.execute(
+                """
+                DELETE FROM events
+                WHERE id <= COALESCE((SELECT MAX(id) FROM events), 0) - ?
+                """,
+                (EVENT_LIMIT,),
+            )
+    finally:
+        connection.close()
+
+
+def log_debug(message: str) -> None:
+    if not os.environ.get("CODEX_AGENTS_DEBUG"):
+        return
+
+    try:
+        path = database_path().parent / "debug.log"
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            handle.write(f"{stamp} {message}\n")
+    except OSError:
+        pass
+
+
+def hook_command(_args: argparse.Namespace) -> int:
+    try:
+        payload = json.load(sys.stdin)
+        if isinstance(payload, dict):
+            ingest_payload(payload)
+    except Exception as error:  # Hooks must never interrupt Codex.
+        log_debug(f"{type(error).__name__}: {error}")
+
+    # Stop and SubagentStop require JSON when a successful hook writes output.
+    # An empty object has no effect for the other lifecycle events.
+    sys.stdout.write("{}\n")
+    return 0
+
+
+def effective_state(state: str, updated_at: float, now: float) -> str:
+    if state in {
+        "working",
+        "waiting_for_approval",
+        "waiting_on_agents",
+        "compacting",
+    } and now - updated_at > STALE_AFTER_SECONDS:
+        return "stale"
+    return state
+
+
+def load_state(
+    connection: sqlite3.Connection,
+    include_completed: bool,
+    cwd_filter: str | None = None,
+) -> list[dict[str, Any]]:
+    sessions = connection.execute(
+        """
+        SELECT session_id, cwd, model, turn_id, state,
+               started_at, updated_at, ended_at, last_event
+        FROM sessions
+        ORDER BY updated_at DESC
+        """
+    ).fetchall()
+    agent_rows = connection.execute(
+        """
+        SELECT session_id, agent_id, agent_type, turn_id, state,
+               started_at, updated_at, ended_at, last_event
+        FROM agents
+        ORDER BY updated_at DESC
+        """
+    ).fetchall()
+
+    agents_by_session: dict[str, list[dict[str, Any]]] = {}
+    for row in agent_rows:
+        agents_by_session.setdefault(row["session_id"], []).append(dict(row))
+
+    result: list[dict[str, Any]] = []
+    for row in sessions:
+        session = dict(row)
+        if cwd_filter and cwd_filter.lower() not in session["cwd"].lower():
+            continue
+        if not include_completed and session["state"] == "ended":
+            continue
+
+        agents = agents_by_session.get(session["session_id"], [])
+        if not include_completed:
+            agents = [
+                agent
+                for agent in agents
+                if agent["state"] not in {"done", "abandoned"}
+            ]
+        session["agents"] = agents
+        result.append(session)
+
+    return result
+
+
+def flatten_state(
+    sessions: Iterable[dict[str, Any]],
+    now: float | None = None,
+) -> list[dict[str, Any]]:
+    current_time = now if now is not None else time.time()
+    rows: list[dict[str, Any]] = []
+
+    for session in sessions:
+        root_state = effective_state(
+            session["state"], session["updated_at"], current_time
+        )
+        rows.append(
+            {
+                "state": root_state,
+                "agent": "main",
+                "agent_id": "",
+                "agent_type": "main",
+                "session_id": session["session_id"],
+                "cwd": session["cwd"],
+                "model": session["model"],
+                "started_at": session["started_at"],
+                "updated_at": session["updated_at"],
+                "ended_at": session["ended_at"],
+            }
+        )
+        for agent in session["agents"]:
+            agent_state = effective_state(
+                agent["state"], agent["updated_at"], current_time
+            )
+            rows.append(
+                {
+                    "state": agent_state,
+                    "agent": agent["agent_type"] or short_id(agent["agent_id"]),
+                    "agent_id": agent["agent_id"],
+                    "agent_type": agent["agent_type"],
+                    "session_id": session["session_id"],
+                    "cwd": session["cwd"],
+                    "model": session["model"],
+                    "started_at": agent["started_at"],
+                    "updated_at": agent["updated_at"],
+                    "ended_at": agent["ended_at"],
+                }
+            )
+
+    return sorted(
+        rows,
+        key=lambda row: (
+            STATE_PRIORITY.get(row["state"], 99),
+            -row["updated_at"],
+        ),
+    )
+
+
+def short_id(identifier: str, length: int = 8) -> str:
+    if len(identifier) <= length:
+        return identifier
+    return identifier[:length]
+
+
+def workspace_name(cwd: str, full_path: bool) -> str:
+    if not cwd:
+        return "-"
+    if full_path:
+        return cwd
+    return Path(cwd).name or cwd
+
+
+def format_duration(started_at: float, ended_at: float | None, now: float) -> str:
+    elapsed = max(0, int((ended_at or now) - started_at))
+    hours, remainder = divmod(elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def state_text(state: str) -> str:
+    return STATE_LABELS.get(state, state.replace("_", " "))
+
+
+def clipped(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(value) <= width:
+        return value
+    if width == 1:
+        return "…"
+    return value[: width - 1] + "…"
+
+
+def table_lines(
+    rows: list[dict[str, Any]],
+    width: int,
+    full_path: bool,
+) -> list[tuple[str, str | None]]:
+    if not rows:
+        return [("No Codex agent activity yet.", None)]
+
+    now = time.time()
+    state_width = 18
+    agent_width = 16
+    age_width = 9
+    model_width = 18
+    fixed_width = state_width + agent_width + age_width + model_width + 8
+    workspace_width = max(12, width - fixed_width)
+    show_model = width >= 82
+    if not show_model:
+        workspace_width = max(12, width - state_width - agent_width - age_width - 6)
+
+    header = (
+        f"{'STATE':<{state_width}} "
+        f"{'AGENT':<{agent_width}} "
+        f"{'WORKSPACE':<{workspace_width}} "
+        f"{'AGE':>{age_width}}"
+    )
+    if show_model:
+        header += f"  {'MODEL':<{model_width}}"
+
+    lines: list[tuple[str, str | None]] = [(clipped(header, width), None)]
+    for row in rows:
+        state = row["state"]
+        state_column = clipped(
+            f"{STATE_SYMBOLS.get(state, '?')} {state_text(state)}", state_width
+        )
+        agent_column = clipped(row["agent"], agent_width)
+        workspace_column = clipped(
+            workspace_name(row["cwd"], full_path), workspace_width
+        )
+        age_column = format_duration(
+            row["started_at"], row["ended_at"], now
+        ).rjust(age_width)
+        line = (
+            f"{state_column:<{state_width}} "
+            f"{agent_column:<{agent_width}} "
+            f"{workspace_column:<{workspace_width}} "
+            f"{age_column}"
+        )
+        if show_model:
+            line += f"  {clipped(row['model'] or '-', model_width):<{model_width}}"
+        lines.append((clipped(line, width), state))
+
+    return lines
+
+
+def list_command(args: argparse.Namespace) -> int:
+    connection = connect_database()
+    try:
+        sessions = load_state(connection, args.all, args.cwd)
+    finally:
+        connection.close()
+
+    rows = flatten_state(sessions)
+    width = max(60, os.get_terminal_size().columns if sys.stdout.isatty() else 100)
+    use_color = sys.stdout.isatty() and not args.no_color and "NO_COLOR" not in os.environ
+    for line, state in table_lines(rows, width, args.full_path):
+        if use_color and state:
+            print(f"{ANSI_COLORS.get(state, '')}{line}{ANSI_RESET}")
+        else:
+            print(line)
+    return 0
+
+
+def json_command(args: argparse.Namespace) -> int:
+    connection = connect_database()
+    try:
+        sessions = load_state(connection, args.all, args.cwd)
+    finally:
+        connection.close()
+
+    now = time.time()
+    output = {
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "database": str(database_path()),
+        "agents": flatten_state(sessions, now),
+    }
+    json.dump(output, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
+
+
+def recent_events(
+    connection: sqlite3.Connection,
+    limit: int,
+    after_id: int | None = None,
+) -> list[sqlite3.Row]:
+    if after_id is not None:
+        return connection.execute(
+            """
+            SELECT id, created_at, event_name, session_id, agent_id,
+                   agent_type, cwd, state, detail
+            FROM events
+            WHERE id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (after_id, limit),
+        ).fetchall()
+
+    rows = connection.execute(
+        """
+        SELECT id, created_at, event_name, session_id, agent_id,
+               agent_type, cwd, state, detail
+        FROM events
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return list(reversed(rows))
+
+
+def event_line(row: sqlite3.Row) -> str:
+    stamp = datetime.fromtimestamp(row["created_at"]).strftime("%H:%M:%S")
+    workspace = workspace_name(row["cwd"], False)
+    agent = row["agent_type"] or (
+        short_id(row["agent_id"]) if row["agent_id"] else "main"
+    )
+    state = f" → {state_text(row['state'])}" if row["state"] else ""
+    detail = f" ({row['detail']})" if row["detail"] else ""
+    return f"{stamp}  {workspace:<20.20}  {agent:<14.14}  {row['event_name']}{detail}{state}"
+
+
+def events_command(args: argparse.Namespace) -> int:
+    connection = connect_database()
+    try:
+        rows = recent_events(connection, args.limit)
+        for row in rows:
+            print(event_line(row))
+
+        if not args.follow:
+            return 0
+
+        last_id = rows[-1]["id"] if rows else 0
+        while True:
+            time.sleep(args.interval)
+            rows = recent_events(connection, args.limit, last_id)
+            for row in rows:
+                print(event_line(row), flush=True)
+                last_id = row["id"]
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        connection.close()
+
+
+def clean_command(args: argparse.Namespace) -> int:
+    now = time.time()
+    completed_cutoff = now - args.completed_hours * 60 * 60
+    ended_cutoff = now - args.ended_days * 24 * 60 * 60
+    connection = connect_database()
+    try:
+        with connection:
+            agents_deleted = connection.execute(
+                """
+                DELETE FROM agents
+                WHERE state IN ('done', 'abandoned')
+                  AND ended_at < ?
+                """,
+                (completed_cutoff,),
+            ).rowcount
+            sessions_deleted = connection.execute(
+                """
+                DELETE FROM sessions
+                WHERE state = 'ended'
+                  AND ended_at < ?
+                """,
+                (ended_cutoff,),
+            ).rowcount
+            connection.execute(
+                """
+                DELETE FROM events
+                WHERE id <= COALESCE((SELECT MAX(id) FROM events), 0) - ?
+                """,
+                (args.events,),
+            )
+        print(
+            f"Removed {agents_deleted} completed agents and "
+            f"{sessions_deleted} ended sessions."
+        )
+        return 0
+    finally:
+        connection.close()
+
+
+def curses_attribute(state: str) -> int:
+    pair = {
+        "working": 1,
+        "waiting_for_approval": 2,
+        "waiting_on_agents": 2,
+        "compacting": 3,
+        "idle": 3,
+        "stale": 4,
+        "done": 5,
+        "abandoned": 4,
+        "ended": 6,
+    }.get(state, 0)
+    return curses.color_pair(pair)
+
+
+def safe_add(
+    screen: curses.window,
+    y: int,
+    x: int,
+    value: str,
+    width: int,
+    attribute: int = 0,
+) -> None:
+    if width <= 0:
+        return
+    try:
+        screen.addnstr(y, x, value, width, attribute)
+    except curses.error:
+        pass
+
+
+def draw_dashboard(
+    screen: curses.window,
+    connection: sqlite3.Connection,
+    include_completed: bool,
+    full_path: bool,
+    cwd_filter: str | None,
+) -> None:
+    screen.erase()
+    height, width = screen.getmaxyx()
+    sessions = load_state(connection, include_completed, cwd_filter)
+    rows = flatten_state(sessions)
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row["state"]] = counts.get(row["state"], 0) + 1
+
+    summary = (
+        f"CODEX AGENTS   ● {counts.get('working', 0)} working   "
+        f"◐ {counts.get('waiting_for_approval', 0) + counts.get('waiting_on_agents', 0)} waiting   "
+        f"○ {counts.get('idle', 0)} idle"
+    )
+    safe_add(screen, 0, 1, clipped(summary, width - 2), width - 2, curses.A_BOLD)
+    safe_add(
+        screen,
+        1,
+        1,
+        clipped(f"State: {database_path()}", width - 2),
+        width - 2,
+        curses.A_DIM,
+    )
+
+    if width < 56 or height < 8:
+        safe_add(
+            screen,
+            3,
+            1,
+            "Terminal is too small for the dashboard.",
+            width - 2,
+            curses.A_BOLD,
+        )
+        screen.refresh()
+        return
+
+    lines = table_lines(rows, width - 2, full_path)
+    y = 3
+    for line, state in lines:
+        if y >= height - 5:
+            break
+        attribute = curses.A_BOLD if state is None else curses_attribute(state)
+        safe_add(screen, y, 1, line, width - 2, attribute)
+        y += 1
+
+    event_y = min(max(y + 1, height - 7), height - 3)
+    if event_y < height - 2:
+        safe_add(screen, event_y, 1, "Recent activity", width - 2, curses.A_BOLD)
+        for event in recent_events(connection, min(4, height - event_y - 2)):
+            event_y += 1
+            if event_y >= height - 1:
+                break
+            safe_add(
+                screen,
+                event_y,
+                1,
+                clipped(event_line(event), width - 2),
+                width - 2,
+                curses.A_DIM,
+            )
+
+    footer = (
+        "q quit   a toggle completed   r refresh"
+        f"   completed: {'shown' if include_completed else 'hidden'}"
+    )
+    safe_add(screen, height - 1, 1, clipped(footer, width - 2), width - 2, curses.A_DIM)
+    screen.refresh()
+
+
+def watch_screen(screen: curses.window, args: argparse.Namespace) -> None:
+    curses.curs_set(0)
+    screen.timeout(max(100, int(args.interval * 1000)))
+    if curses.has_colors():
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_GREEN, -1)
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)
+        curses.init_pair(3, curses.COLOR_CYAN, -1)
+        curses.init_pair(4, curses.COLOR_RED, -1)
+        curses.init_pair(5, curses.COLOR_BLUE, -1)
+        curses.init_pair(6, curses.COLOR_WHITE, -1)
+
+    include_completed = args.all
+    connection = connect_database()
+    try:
+        while True:
+            draw_dashboard(
+                screen,
+                connection,
+                include_completed,
+                args.full_path,
+                args.cwd,
+            )
+            key = screen.getch()
+            if key in {ord("q"), ord("Q")}:
+                return
+            if key in {ord("a"), ord("A")}:
+                include_completed = not include_completed
+    finally:
+        connection.close()
+
+
+def watch_command(args: argparse.Namespace) -> int:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("codex-agents watch requires an interactive terminal.", file=sys.stderr)
+        return 2
+
+    try:
+        curses.wrapper(watch_screen, args)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def add_view_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="include completed agents and ended sessions",
+    )
+    parser.add_argument(
+        "--cwd",
+        metavar="TEXT",
+        help="only show sessions whose working directory contains TEXT",
+    )
+    parser.add_argument(
+        "--full-path",
+        action="store_true",
+        help="show full working-directory paths",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Inspect current Codex agent lifecycle status."
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    hook_parser = subparsers.add_parser(
+        "hook",
+        help="ingest one Codex lifecycle hook payload",
+        description="Consume one Codex hook payload from standard input.",
+    )
+    hook_parser.set_defaults(handler=hook_command)
+
+    watch_parser = subparsers.add_parser(
+        "watch",
+        help="open the live terminal dashboard",
+    )
+    add_view_arguments(watch_parser)
+    watch_parser.add_argument(
+        "--interval",
+        type=float,
+        default=0.5,
+        help="refresh interval in seconds (default: 0.5)",
+    )
+    watch_parser.set_defaults(handler=watch_command)
+
+    list_parser = subparsers.add_parser(
+        "list",
+        help="print a one-shot status table",
+    )
+    add_view_arguments(list_parser)
+    list_parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="disable ANSI colors",
+    )
+    list_parser.set_defaults(handler=list_command)
+
+    events_parser = subparsers.add_parser(
+        "events",
+        help="show recent normalized lifecycle events",
+    )
+    events_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="maximum events to show per read (default: 20)",
+    )
+    events_parser.add_argument(
+        "--follow",
+        action="store_true",
+        help="continue printing new events",
+    )
+    events_parser.add_argument(
+        "--interval",
+        type=float,
+        default=0.5,
+        help="follow polling interval in seconds (default: 0.5)",
+    )
+    events_parser.set_defaults(handler=events_command)
+
+    json_parser = subparsers.add_parser(
+        "json",
+        help="print normalized status as JSON",
+    )
+    add_view_arguments(json_parser)
+    json_parser.set_defaults(handler=json_command)
+
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="remove old completed state",
+    )
+    clean_parser.add_argument(
+        "--completed-hours",
+        type=float,
+        default=24,
+        help="retain completed agents for this many hours (default: 24)",
+    )
+    clean_parser.add_argument(
+        "--ended-days",
+        type=float,
+        default=7,
+        help="retain ended sessions for this many days (default: 7)",
+    )
+    clean_parser.add_argument(
+        "--events",
+        type=int,
+        default=EVENT_LIMIT,
+        help=f"retain this many recent events (default: {EVENT_LIMIT})",
+    )
+    clean_parser.set_defaults(handler=clean_command)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    arguments = sys.argv[1:] or ["watch"]
+    args = parser.parse_args(arguments)
+    if not hasattr(args, "handler"):
+        parser.print_help()
+        return 2
+    return args.handler(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
