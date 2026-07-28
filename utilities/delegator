@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+YELLOW=$'\033[0;33m'
+GREEN=$'\033[0;32m'
+WHITE=$'\033[0;37m'
+RESET=$'\033[0m'
+
 usage() {
-  cat <<'EOF'
- ~ deleGATOR ~
+  cat <<'EOF' | sed \
+    -e "s/{yellow}/${YELLOW}/g" \
+    -e "s/{green}/${GREEN}/g" \
+    -e "s/{white}/${WHITE}/g" \
+    -e "s/{reset}/${RESET}/g"
+ ~ {yellow}dele{green}GATOR{reset} ~
 
              _.'^^'.
   _      _.-' ((@)) '.   ./\/\/\/\/\/\,.---.__
