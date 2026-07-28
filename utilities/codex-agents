@@ -504,12 +504,12 @@ def workspace_name(cwd: str, full_path: bool) -> str:
 
 
 def format_duration(started_at: float, ended_at: float | None, now: float) -> str:
-    elapsed = max(0, int((ended_at or now) - started_at))
-    hours, remainder = divmod(elapsed, 3600)
-    minutes, seconds = divmod(remainder, 60)
+    elapsed = max(0, (ended_at or now) - started_at)
+    rounded_minutes = int((elapsed + 30) // 60)
+    hours, minutes = divmod(rounded_minutes, 60)
     if hours:
-        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
-    return f"{minutes:02d}:{seconds:02d}"
+        return f"{hours:d}h {minutes:02d}m"
+    return f"{minutes:d}m"
 
 
 def state_text(state: str) -> str:
