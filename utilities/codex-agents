@@ -17,6 +17,7 @@ from typing import Any, Iterable
 
 EVENT_LIMIT = 1000
 STALE_AFTER_SECONDS = 6 * 60 * 60
+DEFAULT_STALE_HOURS = STALE_AFTER_SECONDS / (60 * 60)
 STATE_PRIORITY = {
     "waiting_for_approval": 0,
     "working": 1,
@@ -389,6 +390,51 @@ def effective_state(state: str, updated_at: float, now: float) -> str:
     return state
 
 
+def reconcile_stale_state(
+    connection: sqlite3.Connection,
+    stale_hours: float,
+    now: float | None = None,
+) -> tuple[int, int]:
+    """Close nonterminal state whose last lifecycle event is too old."""
+    current_time = now if now is not None else time.time()
+    stale_cutoff = current_time - stale_hours * 60 * 60
+
+    agents_reconciled = connection.execute(
+        """
+        UPDATE agents
+        SET state = 'abandoned',
+            updated_at = ?,
+            ended_at = ?,
+            last_event = 'StaleReconcile'
+        WHERE state NOT IN ('done', 'abandoned')
+          AND (
+              updated_at <= ?
+              OR session_id IN (
+                  SELECT session_id
+                  FROM sessions
+                  WHERE state <> 'ended'
+                    AND updated_at <= ?
+              )
+          )
+        """,
+        (current_time, current_time, stale_cutoff, stale_cutoff),
+    ).rowcount
+    sessions_reconciled = connection.execute(
+        """
+        UPDATE sessions
+        SET state = 'ended',
+            updated_at = ?,
+            ended_at = ?,
+            last_event = 'StaleReconcile'
+        WHERE state <> 'ended'
+          AND updated_at <= ?
+        """,
+        (current_time, current_time, stale_cutoff),
+    ).rowcount
+
+    return agents_reconciled, sessions_reconciled
+
+
 def load_state(
     connection: sqlite3.Connection,
     include_completed: bool,
@@ -683,11 +729,16 @@ def events_command(args: argparse.Namespace) -> int:
 
 def clean_command(args: argparse.Namespace) -> int:
     now = time.time()
-    completed_cutoff = now - args.completed_hours * 60 * 60
-    ended_cutoff = now - args.ended_days * 24 * 60 * 60
     connection = connect_database()
     try:
         with connection:
+            agents_reconciled, sessions_reconciled = reconcile_stale_state(
+                connection,
+                args.stale_hours,
+                now,
+            )
+            completed_cutoff = time.time() - args.completed_hours * 60 * 60
+            ended_cutoff = time.time() - args.ended_days * 24 * 60 * 60
             agents_deleted = connection.execute(
                 """
                 DELETE FROM agents
@@ -712,6 +763,8 @@ def clean_command(args: argparse.Namespace) -> int:
                 (args.events,),
             )
         print(
+            f"Reconciled {agents_reconciled} stale agents and "
+            f"{sessions_reconciled} stale sessions. "
             f"Removed {agents_deleted} completed agents and "
             f"{sessions_deleted} ended sessions."
         )
@@ -842,6 +895,9 @@ def watch_screen(screen: curses.window, args: argparse.Namespace) -> None:
     include_completed = args.all
     connection = connect_database()
     try:
+        if args.reconcile_stale:
+            with connection:
+                reconcile_stale_state(connection, args.stale_hours)
         while True:
             draw_dashboard(
                 screen,
@@ -869,6 +925,13 @@ def watch_command(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     return 0
+
+
+def non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
 
 
 def add_view_arguments(parser: argparse.ArgumentParser) -> None:
@@ -912,6 +975,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.5,
         help="refresh interval in seconds (default: 0.5)",
+    )
+    watch_parser.add_argument(
+        "--reconcile-stale",
+        action="store_true",
+        help="mark stale active state as ended before opening the dashboard",
+    )
+    watch_parser.add_argument(
+        "--stale-hours",
+        type=non_negative_float,
+        default=DEFAULT_STALE_HOURS,
+        help=(
+            "age used by --reconcile-stale, in hours "
+            f"(default: {DEFAULT_STALE_HOURS:g})"
+        ),
     )
     watch_parser.set_defaults(handler=watch_command)
 
@@ -960,6 +1037,15 @@ def build_parser() -> argparse.ArgumentParser:
     clean_parser = subparsers.add_parser(
         "clean",
         help="remove old completed state",
+    )
+    clean_parser.add_argument(
+        "--stale-hours",
+        type=non_negative_float,
+        default=DEFAULT_STALE_HOURS,
+        help=(
+            "mark nonterminal state older than this many hours as ended "
+            f"(default: {DEFAULT_STALE_HOURS:g})"
+        ),
     )
     clean_parser.add_argument(
         "--completed-hours",

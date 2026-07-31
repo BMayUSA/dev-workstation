@@ -41,6 +41,20 @@ codex-agents json
 codex-agents clean
 ```
 
+`clean` marks active agents and sessions with no lifecycle events for six hours
+as abandoned or ended before applying the normal completed-state retention
+periods. Use `--stale-hours HOURS` to change that cutoff.
+
+To perform the same reconciliation once when opening the dashboard, opt in
+with:
+
+```sh
+codex-agents watch --reconcile-stale
+```
+
+The watch command also accepts `--stale-hours HOURS`; without
+`--reconcile-stale`, opening and closing the dashboard remains read-only.
+
 By default, state is stored at:
 
 ```text
