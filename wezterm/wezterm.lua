@@ -8,8 +8,8 @@ config.max_fps = 120
 
 config.window_decorations = "INTEGRATED_BUTTONS|RESIZE"
 config.window_padding = {
-  left = 8,
-  right = 8,
+  left = 16,
+  right = 16,
   top = 6,
   bottom = 6,
 }
