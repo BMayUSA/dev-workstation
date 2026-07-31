@@ -114,7 +114,6 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "^wait_agent$",
         "hooks": [
           {
             "type": "command",

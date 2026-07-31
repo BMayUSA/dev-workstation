@@ -162,6 +162,7 @@ def session_state_for(payload: dict[str, Any], event_name: str) -> str | None:
         "SessionEnd": "ended",
         "UserPromptSubmit": "working",
         "PermissionRequest": "waiting_for_approval",
+        "PostToolUse": "working",
         "PreCompact": "compacting",
         "PostCompact": "working",
         "SubagentStart": "working",
@@ -171,11 +172,8 @@ def session_state_for(payload: dict[str, Any], event_name: str) -> str | None:
         return direct_states[event_name]
 
     tool_name = text_field(payload, "tool_name")
-    if tool_name == "wait_agent":
-        if event_name == "PreToolUse":
-            return "waiting_on_agents"
-        if event_name == "PostToolUse":
-            return "working"
+    if tool_name == "wait_agent" and event_name == "PreToolUse":
+        return "waiting_on_agents"
 
     return None
 

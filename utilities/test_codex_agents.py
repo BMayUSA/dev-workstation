@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import json
 import os
 import tempfile
 import time
@@ -179,6 +180,55 @@ class StaleReconciliationTests(unittest.TestCase):
             codex_agents.watch_screen(QuitScreen(), arguments)
 
         self.assertEqual(self.states("old"), ("working", "working"))
+
+
+class PermissionStateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_directory = tempfile.TemporaryDirectory()
+        self.database = Path(self.temp_directory.name) / "status.sqlite3"
+        self.environment = mock.patch.dict(
+            os.environ,
+            {"CODEX_AGENTS_DB": str(self.database)},
+        )
+        self.environment.start()
+
+    def tearDown(self) -> None:
+        self.environment.stop()
+        self.temp_directory.cleanup()
+
+    def session_state(self, session_id: str) -> str:
+        connection = codex_agents.connect_database()
+        try:
+            return connection.execute(
+                "SELECT state FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()["state"]
+        finally:
+            connection.close()
+
+    def test_post_tool_use_restores_working_after_permission_request(self) -> None:
+        base_payload = {
+            "session_id": "approval",
+            "cwd": "/tmp/example",
+            "tool_name": "Bash",
+        }
+        codex_agents.ingest_payload(
+            {**base_payload, "hook_event_name": "PermissionRequest"}
+        )
+        self.assertEqual(self.session_state("approval"), "waiting_for_approval")
+
+        codex_agents.ingest_payload(
+            {**base_payload, "hook_event_name": "PostToolUse"}
+        )
+        self.assertEqual(self.session_state("approval"), "working")
+
+    def test_post_tool_use_hook_matches_every_supported_tool(self) -> None:
+        hooks_path = Path(__file__).parents[1] / "codex" / "hooks.json"
+        with hooks_path.open(encoding="utf-8") as handle:
+            post_tool_hooks = json.load(handle)["hooks"]["PostToolUse"]
+
+        self.assertTrue(post_tool_hooks)
+        self.assertTrue(all("matcher" not in group for group in post_tool_hooks))
 
 
 if __name__ == "__main__":
