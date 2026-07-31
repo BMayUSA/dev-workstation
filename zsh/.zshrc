@@ -84,7 +84,7 @@ _evalcache zoxide init zsh
 
 # Load custom zsh functions
 fpath+=("$HOME/.zsh_funcs")
-autoload -Uz branchdiff toBinary fromBinary listening extract qrcode
+autoload -Uz branchdiff toBinary fromBinary listening extract qrcode theme
 
 # Set personal aliases, overriding those provided by oh-my-zsh libs,
 # plugins, and themes. Aliases can be placed here, though oh-my-zsh

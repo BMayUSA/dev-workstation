@@ -1,0 +1,4 @@
+theme() {
+  tmux set status-style "bg=$1"
+  tmux set-option pane-active-border-style "fg=$1"
+}
