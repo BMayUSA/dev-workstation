@@ -771,6 +771,16 @@ def clean_command(args: argparse.Namespace) -> int:
         connection.close()
 
 
+def serve_command(args: argparse.Namespace) -> int:
+    """Run the local Codex work organizer web application."""
+    module_directory = str(Path(__file__).resolve().parent)
+    if module_directory not in sys.path:
+        sys.path.insert(0, module_directory)
+    from codex_agents_web import serve
+
+    return serve(database_path(), args.host, args.port, args.open)
+
+
 def curses_attribute(state: str) -> int:
     pair = {
         "working": 1,
@@ -1064,6 +1074,29 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"retain this many recent events (default: {EVENT_LIMIT})",
     )
     clean_parser.set_defaults(handler=clean_command)
+
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="run the local Codex work organizer",
+        description="Serve the local, single-user Codex work organizer web app.",
+    )
+    serve_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="interface to bind (default: 127.0.0.1)",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="port to bind, or 0 for an available port (default: 8765)",
+    )
+    serve_parser.add_argument(
+        "--open",
+        action="store_true",
+        help="open the workboard in the default browser",
+    )
+    serve_parser.set_defaults(handler=serve_command)
 
     return parser
 

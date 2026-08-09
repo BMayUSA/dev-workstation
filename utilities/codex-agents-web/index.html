@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Codex Workboard</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">C</div>
+          <div>
+            <h1>Workboard</h1>
+            <p>Local Codex organizer</p>
+          </div>
+        </div>
+
+        <nav class="primary-nav" aria-label="Primary navigation">
+          <button class="nav-item active" data-view="board">
+            <span class="nav-icon">▦</span>
+            Board
+            <span class="nav-count" id="board-count">0</span>
+          </button>
+          <button class="nav-item" data-view="threads">
+            <span class="nav-icon">☰</span>
+            All threads
+            <span class="nav-count" id="thread-count">0</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-section">
+          <div class="section-label">Workflow</div>
+          <label class="filter-row">
+            <input type="checkbox" id="show-completed">
+            <span>Show completed</span>
+          </label>
+          <label class="field compact-field">
+            <span>Status</span>
+            <select id="status-filter">
+              <option value="">All statuses</option>
+              <option value="open">Open</option>
+              <option value="in_progress">In progress</option>
+              <option value="waiting">Waiting</option>
+              <option value="paused">Paused</option>
+              <option value="done">Done</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="sidebar-section tags-filter-section">
+          <div class="section-label">Tags</div>
+          <div id="tag-filters" class="tag-filter-list">
+            <span class="muted">No tags yet</span>
+          </div>
+        </div>
+
+        <div class="sidebar-footer">
+          <div class="index-state">
+            <span class="pulse-dot"></span>
+            <span id="index-status">Preparing local search…</span>
+          </div>
+          <p>Codex data remains read-only.</p>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="search-wrap">
+            <span class="search-icon">⌕</span>
+            <input id="global-search" type="search" autocomplete="off"
+              placeholder="Search threads, notes, repositories, or conversation text…">
+            <kbd>⌘ K</kbd>
+          </div>
+          <div class="header-actions">
+            <button class="button secondary" id="new-work-item">+ Work item</button>
+            <button class="button primary" id="new-zone">+ Zone</button>
+          </div>
+        </header>
+
+        <section class="view active" id="board-view">
+          <div class="view-heading">
+            <div>
+              <p class="eyebrow">Your working set</p>
+              <h2>Global board</h2>
+            </div>
+            <div class="live-summary" id="live-summary"></div>
+          </div>
+          <div id="board" class="board" aria-live="polite"></div>
+        </section>
+
+        <section class="view" id="threads-view">
+          <div class="view-heading">
+            <div>
+              <p class="eyebrow">Local Codex history</p>
+              <h2>All threads</h2>
+            </div>
+            <p class="view-note">Historical threads stay searchable without crowding your board.</p>
+          </div>
+          <div class="thread-list-shell">
+            <div class="thread-list-header">
+              <span>Thread</span><span>Workspace</span><span>Updated</span><span></span>
+            </div>
+            <div id="thread-list" class="thread-list"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="scrim" id="scrim" hidden></div>
+    <aside class="drawer" id="detail-drawer" aria-hidden="true">
+      <div class="drawer-header">
+        <button class="icon-button" id="close-drawer" aria-label="Close details">×</button>
+        <div class="drawer-header-actions">
+          <button class="button quiet" id="copy-thread-id" hidden>Copy thread ID</button>
+          <button class="button primary" id="save-detail">Save</button>
+        </div>
+      </div>
+      <div id="drawer-content" class="drawer-content"></div>
+    </aside>
+
+    <dialog id="prompt-dialog">
+      <form method="dialog" id="prompt-form">
+        <p class="eyebrow" id="dialog-eyebrow">Create</p>
+        <h3 id="dialog-title">Add something</h3>
+        <label class="field">
+          <span id="dialog-label">Name</span>
+          <input id="dialog-input" required autocomplete="off">
+        </label>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel">Cancel</button>
+          <button class="button primary" value="confirm" id="dialog-confirm">Create</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
