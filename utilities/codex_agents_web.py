@@ -109,6 +109,7 @@ def initialize_organizer_schema(connection: sqlite3.Connection) -> None:
                 CHECK(workflow_status IN ('open','in_progress','waiting','paused','done')),
             zone_id INTEGER,
             position INTEGER NOT NULL DEFAULT 0,
+            pinned_at REAL,
             dismissed_at REAL,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL,
@@ -175,6 +176,11 @@ def initialize_organizer_schema(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE thread_catalog ADD COLUMN inbox_candidate INTEGER NOT NULL DEFAULT 0"
         )
+    card_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(organizer_cards)")
+    }
+    if "pinned_at" not in card_columns:
+        connection.execute("ALTER TABLE organizer_cards ADD COLUMN pinned_at REAL")
     connection.execute(
         """
         INSERT INTO zones (name, position, system_kind, created_at)
@@ -443,7 +449,10 @@ class Organizer:
                   AND (c.card_type = 'work_item' OR NOT EXISTS (
                       SELECT 1 FROM work_item_threads w WHERE w.thread_id = c.thread_id
                   ))
-                ORDER BY c.zone_id, c.position, c.created_at
+                ORDER BY
+                    CASE WHEN c.pinned_at IS NULL THEN 1 ELSE 0 END,
+                    COALESCE(t.updated_at, c.updated_at) DESC,
+                    c.created_at DESC
                 """,
                 parameters,
             ).fetchall()
@@ -563,7 +572,7 @@ class Organizer:
             rows = connection.execute(
                 f"""
                 SELECT t.*, c.card_id, c.title_override, c.workflow_status,
-                       c.dismissed_at, w.work_item_id
+                       c.pinned_at, c.dismissed_at, w.work_item_id
                 FROM thread_catalog t
                 LEFT JOIN organizer_cards c ON c.thread_id = t.thread_id
                 LEFT JOIN work_item_threads w ON w.thread_id = t.thread_id
@@ -586,7 +595,7 @@ class Organizer:
             row = connection.execute(
                 """
                 SELECT t.*, c.card_id, c.title_override, c.note,
-                       c.workflow_status, c.zone_id, c.dismissed_at,
+                       c.workflow_status, c.zone_id, c.pinned_at, c.dismissed_at,
                        w.work_item_id
                 FROM thread_catalog t
                 LEFT JOIN organizer_cards c ON c.thread_id = t.thread_id
@@ -705,7 +714,10 @@ class Organizer:
             connection.close()
 
     def update_card(self, card_id: str, changes: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"title_override", "note", "workflow_status", "zone_id", "position", "dismissed"}
+        allowed = {
+            "title_override", "note", "workflow_status", "zone_id", "position",
+            "pinned", "dismissed",
+        }
         unknown = set(changes) - allowed - {"tags"}
         if unknown:
             raise ValueError(f"Unsupported fields: {', '.join(sorted(unknown))}")
@@ -717,9 +729,14 @@ class Organizer:
             if field in changes:
                 assignments.append(f"{field} = ?")
                 parameters.append(changes[field])
+        if "pinned" in changes and not changes.get("dismissed"):
+            assignments.append("pinned_at = ?")
+            parameters.append(time.time() if changes["pinned"] else None)
         if "dismissed" in changes:
             assignments.append("dismissed_at = ?")
             parameters.append(time.time() if changes["dismissed"] else None)
+            if changes["dismissed"]:
+                assignments.append("pinned_at = NULL")
         assignments.append("updated_at = ?")
         parameters.append(time.time())
         parameters.append(card_id)

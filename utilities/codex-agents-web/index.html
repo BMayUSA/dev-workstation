@@ -19,7 +19,7 @@
 
         <nav class="primary-nav" aria-label="Primary navigation">
           <button class="nav-item active" data-view="board">
-            <span class="nav-icon">▦</span>
+            <span class="nav-icon">●</span>
             Board
             <span class="nav-count" id="board-count">0</span>
           </button>
@@ -75,7 +75,6 @@
           </div>
           <div class="header-actions">
             <button class="button secondary" id="new-work-item">+ Work item</button>
-            <button class="button primary" id="new-zone">+ Zone</button>
           </div>
         </header>
 
@@ -83,10 +82,11 @@
           <div class="view-heading">
             <div>
               <p class="eyebrow">Your working set</p>
-              <h2>Global board</h2>
+              <h2>Thread board</h2>
             </div>
             <div class="live-summary" id="live-summary"></div>
           </div>
+          <p class="board-intro">New threads arrive here automatically. Pin the important ones or dismiss them to All threads.</p>
           <div id="board" class="board" aria-live="polite"></div>
         </section>
 
@@ -96,11 +96,11 @@
               <p class="eyebrow">Local Codex history</p>
               <h2>All threads</h2>
             </div>
-            <p class="view-note">Historical threads stay searchable without crowding your board.</p>
+            <p class="view-note">Dismissed and historical threads remain searchable here.</p>
           </div>
           <div class="thread-list-shell">
             <div class="thread-list-header">
-              <span>Thread</span><span>Workspace</span><span>Updated</span><span></span>
+              <span>Thread</span><span>Project / working directory</span><span>Updated</span><span></span>
             </div>
             <div id="thread-list" class="thread-list"></div>
           </div>

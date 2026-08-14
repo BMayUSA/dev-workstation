@@ -5,7 +5,6 @@ const state = {
   activeTag: '',
   status: '',
   activeDetail: null,
-  draggedCard: null,
   refreshTimer: null,
 };
 
@@ -52,6 +51,10 @@ function relativeTime(timestamp) {
 
 function workspaceName(path = '') {
   return path.split('/').filter(Boolean).at(-1) || 'No workspace';
+}
+
+function workspaceMarkup(path = '') {
+  return `<span class="workspace-tag" title="${escapeHtml(path || 'Working directory unavailable')}">${escapeHtml(workspaceName(path))}</span>`;
 }
 
 function toast(message) {
@@ -106,70 +109,89 @@ function filteredCards() {
 function renderBoard() {
   if (!state.snapshot) return;
   const cards = filteredCards();
+  const pinned = cards.filter(card => card.card_type === 'thread' && card.pinned_at);
+  const recent = cards.filter(card => card.card_type === 'thread' && !card.pinned_at);
+  const workItems = cards.filter(card => card.card_type === 'work_item');
   const root = $('#board');
-  root.innerHTML = state.snapshot.zones.map(zone => {
-    const zoneCards = cards.filter(card => card.zone_id === zone.zone_id);
-    return `<section class="zone ${zone.system_kind ? 'system' : ''}" data-zone-id="${zone.zone_id}">
-      <header class="zone-header">
-        <div class="zone-title"><span class="zone-dot"></span><h3>${escapeHtml(zone.name)}</h3></div>
-        <span class="zone-count">${zoneCards.length}</span>
-      </header>
-      <div class="zone-cards">
-        ${zoneCards.length ? zoneCards.map(cardTemplate).join('') : '<div class="zone-empty">Drop a card here</div>'}
-      </div>
-    </section>`;
-  }).join('');
+  root.innerHTML = `${pinned.length ? boardSection('Pinned', pinned, 'Kept at the top') : ''}
+    ${boardSection('Inbox', recent, 'Newest activity first')}
+    ${workItems.length ? boardSection('Work items', workItems, 'Grouped threads') : ''}`;
   bindBoardEvents();
   renderLiveSummary(cards);
+}
+
+function boardSection(title, cards, note) {
+  const empty = title === 'Inbox'
+    ? '<div class="board-empty"><strong>Your board is clear</strong>New Codex threads will appear here automatically.</div>'
+    : '';
+  return `<section class="board-section">
+    <header class="board-section-header">
+      <div><h3>${title}</h3><span>${note}</span></div>
+      <span class="board-section-count">${cards.length}</span>
+    </header>
+    <div class="board-rows">${cards.length ? cards.map(cardTemplate).join('') : empty}</div>
+  </section>`;
 }
 
 function cardTemplate(card) {
   const operational = card.operational?.state || 'unknown';
   const tagMarkup = card.tags.slice(0, 3).map(tag => `<span class="tag">${escapeHtml(tag.name)}</span>`).join('');
   const workCount = card.card_type === 'work_item' ? `<span class="thread-count-badge">${card.threads.length} thread${card.threads.length === 1 ? '' : 's'}</span>` : '';
-  return `<article class="card" draggable="true" data-card-id="${escapeHtml(card.card_id)}">
-    <div class="card-top">
-      <span class="card-kind">${card.card_type === 'work_item' ? 'Work item' : 'Thread'}</span>
-      <span class="operational-badge ${operational}">${escapeHtml(prettyOperational(operational))}</span>
+  const pinned = Boolean(card.pinned_at);
+  const updatedAt = card.thread_updated_at || card.updated_at;
+  return `<article class="card ${pinned ? 'pinned' : ''}" data-card-id="${escapeHtml(card.card_id)}">
+    <div class="card-content">
+      <div class="card-top">
+        <span class="card-kind">${card.card_type === 'work_item' ? 'Work item' : 'Thread'}</span>
+        ${workspaceMarkup(card.cwd)}
+        <span class="operational-badge ${operational}">${escapeHtml(prettyOperational(operational))}</span>
+      </div>
+      <h4>${escapeHtml(card.title)}</h4>
+      <p class="card-preview">${escapeHtml(card.preview || 'No preview available.')}</p>
+      ${tagMarkup ? `<div class="card-tags">${tagMarkup}</div>` : ''}
     </div>
-    <h4>${escapeHtml(card.title)}</h4>
-    <p class="card-preview">${escapeHtml(card.preview || 'No preview available.')}</p>
-    ${tagMarkup ? `<div class="card-tags">${tagMarkup}</div>` : ''}
-    <div class="card-footer">
+    <div class="card-aside">
+      <time title="${escapeHtml(new Date(updatedAt * 1000).toLocaleString())}">${relativeTime(updatedAt)}</time>
       <span class="status-badge ${card.workflow_status}">${escapeHtml(prettyStatus(card.workflow_status))}</span>
-      ${workCount || `<span class="workspace">${escapeHtml(workspaceName(card.cwd))}</span>`}
+      ${workCount}
+      ${card.card_type === 'thread' ? `<div class="card-actions">
+        <button class="icon-button board-pin ${pinned ? 'active' : ''}" data-card-id="${escapeHtml(card.card_id)}" data-pinned="${pinned}" aria-label="${pinned ? 'Unpin' : 'Pin'} ${escapeHtml(card.title)}" title="${pinned ? 'Unpin' : 'Pin'}">${pinned ? '◆' : '◇'}</button>
+        <button class="icon-button board-dismiss" data-card-id="${escapeHtml(card.card_id)}" aria-label="Move ${escapeHtml(card.title)} to All threads" title="Move to All threads">×</button>
+      </div>` : ''}
     </div>
   </article>`;
 }
 
 function bindBoardEvents() {
   $$('.card').forEach(card => {
-    card.addEventListener('click', () => openCard(card.dataset.cardId));
-    card.addEventListener('dragstart', event => {
-      state.draggedCard = card.dataset.cardId;
-      card.classList.add('dragging');
-      event.dataTransfer.effectAllowed = 'move';
-      event.dataTransfer.setData('text/plain', card.dataset.cardId);
-    });
-    card.addEventListener('dragend', () => { card.classList.remove('dragging'); state.draggedCard = null; });
-  });
-  $$('.zone').forEach(zone => {
-    zone.addEventListener('dragover', event => { event.preventDefault(); zone.classList.add('drag-over'); });
-    zone.addEventListener('dragleave', event => {
-      if (!zone.contains(event.relatedTarget)) zone.classList.remove('drag-over');
-    });
-    zone.addEventListener('drop', async event => {
-      event.preventDefault(); zone.classList.remove('drag-over');
-      const cardId = state.draggedCard || event.dataTransfer.getData('text/plain');
-      if (!cardId) return;
-      try {
-        await api(`/api/cards/${encodeURIComponent(cardId)}`, {
-          method: 'PATCH', body: JSON.stringify({ zone_id: Number(zone.dataset.zoneId), position: Date.now() }),
-        });
-        await loadState({ quiet: true });
-      } catch (error) { toast(error.message); }
+    card.addEventListener('click', event => {
+      if (!event.target.closest('button')) openCard(card.dataset.cardId);
     });
   });
+  $$('.board-pin').forEach(button => button.addEventListener('click', async event => {
+    event.stopPropagation();
+    await setPinned(button.dataset.cardId, button.dataset.pinned !== 'true');
+  }));
+  $$('.board-dismiss').forEach(button => button.addEventListener('click', async event => {
+    event.stopPropagation();
+    try {
+      await api(`/api/cards/${encodeURIComponent(button.dataset.cardId)}`, {
+        method: 'PATCH', body: JSON.stringify({ dismissed: true }),
+      });
+      await loadState({ quiet: true }); toast('Moved to All threads');
+    } catch (error) { toast(error.message); }
+  }));
+}
+
+async function setPinned(cardId, pinned) {
+  try {
+    await api(`/api/cards/${encodeURIComponent(cardId)}`, {
+      method: 'PATCH', body: JSON.stringify({ pinned }),
+    });
+    await loadState({ quiet: true });
+    if (state.view === 'threads') await loadThreads();
+    toast(pinned ? 'Pinned to the top' : 'Unpinned');
+  } catch (error) { toast(error.message); }
 }
 
 function renderLiveSummary(cards) {
@@ -194,9 +216,15 @@ async function loadThreads() {
     $$('.promote-thread', root).forEach(button => button.addEventListener('click', async event => {
       event.stopPropagation();
       try {
+        const returning = button.textContent.trim() === 'Return to board';
         await api('/api/cards/thread', { method: 'POST', body: JSON.stringify({ thread_id: button.dataset.threadId }) });
-        toast('Added to Inbox'); await loadState({ quiet: true }); await loadThreads();
+        toast(returning ? 'Returned to board' : 'Added to board');
+        await loadState({ quiet: true }); await loadThreads();
       } catch (error) { toast(error.message); }
+    }));
+    $$('.pin-thread', root).forEach(button => button.addEventListener('click', async event => {
+      event.stopPropagation();
+      await setPinned(button.dataset.cardId, button.dataset.pinned !== 'true');
     }));
   } catch (error) { root.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`; }
 }
@@ -206,14 +234,15 @@ function threadTemplate(thread) {
   if (thread.work_item_id) {
     action = '<span class="status-badge">In work item</span>';
   } else if (thread.card_id && !thread.dismissed_at) {
-    action = '<span class="status-badge">On board</span>';
+    const pinned = Boolean(thread.pinned_at);
+    action = `<button class="button quiet pin-thread" data-card-id="${escapeHtml(thread.card_id)}" data-pinned="${pinned}">${pinned ? 'Unpin' : 'Pin'}</button>`;
   } else {
-    const label = thread.dismissed_at ? 'Restore' : 'Add to board';
+    const label = thread.dismissed_at ? 'Return to board' : 'Add to board';
     action = `<button class="button quiet promote-thread" data-thread-id="${escapeHtml(thread.thread_id)}">${label}</button>`;
   }
   return `<div class="thread-row" data-thread-id="${escapeHtml(thread.thread_id)}">
     <div class="thread-main"><strong>${escapeHtml(thread.title || 'Untitled thread')}</strong><p>${escapeHtml(thread.preview || thread.thread_id)}</p></div>
-    <div class="thread-workspace">${escapeHtml(workspaceName(thread.cwd))}</div>
+    <div class="thread-workspace">${workspaceMarkup(thread.cwd)}<span title="${escapeHtml(thread.cwd)}">${escapeHtml(thread.cwd || 'Unavailable')}</span></div>
     <div class="thread-date">${relativeTime(thread.updated_at)}</div>
     <div class="row-action">${action}</div>
   </div>`;
@@ -270,16 +299,18 @@ function renderCardDetail(detail) {
     <div class="detail-meta">${detail.cwd ? `<span>${escapeHtml(detail.cwd)}</span>` : ''}${detail.thread_id ? `<span>${escapeHtml(detail.thread_id)}</span>` : ''}</div>
     ${cardFields(detail)}
     ${children}
-    ${detail.card_type === 'thread' ? '<section class="detail-section"><button class="button secondary" id="view-conversation">View full conversation</button></section>' : ''}
-    ${detail.card_type === 'thread' ? '<section class="detail-section"><button class="button danger" id="dismiss-card">Dismiss from board</button></section>' : ''}`;
+    ${detail.card_type === 'thread' ? `<section class="detail-section detail-board-actions"><button class="button secondary" id="view-conversation">View full conversation</button><button class="button quiet" id="toggle-pin-card">${detail.pinned_at ? 'Unpin' : 'Pin to top'}</button><button class="button danger" id="dismiss-card">Move to All threads</button></section>` : ''}`;
   bindCardDetail(detail);
 }
 
 function bindCardDetail(detail) {
   $('#save-detail').onclick = () => saveActiveCard();
   $('#copy-thread-id').onclick = () => copyText(detail.thread_id, 'Thread ID copied');
+  $('#toggle-pin-card')?.addEventListener('click', async () => {
+    await setPinned(detail.card_id, !detail.pinned_at); closeDrawer();
+  });
   if ($('#dismiss-card')) $('#dismiss-card').onclick = async () => {
-    try { await api(`/api/cards/${encodeURIComponent(detail.card_id)}`, { method: 'PATCH', body: JSON.stringify({ dismissed: true }) }); closeDrawer(); await loadState(); toast('Dismissed from board'); }
+    try { await api(`/api/cards/${encodeURIComponent(detail.card_id)}`, { method: 'PATCH', body: JSON.stringify({ dismissed: true }) }); closeDrawer(); await loadState(); toast('Moved to All threads'); }
     catch (error) { toast(error.message); }
   };
   $('#view-conversation')?.addEventListener('click', () => openThread(detail.thread_id));
@@ -317,8 +348,10 @@ function renderThreadDetail(detail) {
   const tools = detail.tools.map(tool => `<details><summary>${escapeHtml(tool.name)}${tool.status ? ` · ${escapeHtml(tool.status)}` : ''}</summary><div class="tool-output">${escapeHtml(tool.input)}${tool.output ? `\n\nOutput\n${escapeHtml(tool.output)}` : ''}</div></details>`).join('');
   const subagents = detail.subagents.map(thread => `<div class="child-thread"><div><strong>${escapeHtml(thread.native_title || 'Subagent')}</strong><span>${relativeTime(thread.updated_at)}</span></div><button class="button quiet view-subagent" data-thread-id="${escapeHtml(thread.thread_id)}">View</button></div>`).join('');
   const cardAction = detail.work_item_id ? '' : detail.dismissed_at
-    ? `<button class="button secondary" id="promote-detail">Restore to Inbox</button>`
-    : detail.card_id ? '' : `<button class="button secondary" id="promote-detail">Add to Inbox</button>`;
+    ? `<button class="button secondary" id="promote-detail">Return to board</button>`
+    : detail.card_id
+      ? `<button class="button quiet" id="pin-detail">${detail.pinned_at ? 'Unpin' : 'Pin to top'}</button>`
+      : `<button class="button secondary" id="promote-detail">Add to board</button>`;
   const attachOptions = workItemOptions(detail.work_item_id);
   $('#drawer-content').innerHTML = `
     <div class="detail-eyebrow"><span>Codex thread</span><span class="operational-badge ${operational}">${escapeHtml(prettyOperational(operational))}</span></div>
@@ -340,8 +373,11 @@ function workItemOptions(selected) {
 function bindThreadDetail(detail) {
   $('#copy-thread-id').onclick = () => copyText(detail.thread_id, 'Thread ID copied');
   $('#promote-detail')?.addEventListener('click', async () => {
-    try { await api('/api/cards/thread', { method: 'POST', body: JSON.stringify({ thread_id: detail.thread_id }) }); await loadState({ quiet: true }); await openThread(detail.thread_id); toast(detail.dismissed_at ? 'Restored to Inbox' : 'Added to Inbox'); }
+    try { await api('/api/cards/thread', { method: 'POST', body: JSON.stringify({ thread_id: detail.thread_id }) }); await loadState({ quiet: true }); await openThread(detail.thread_id); toast(detail.dismissed_at ? 'Returned to board' : 'Added to board'); }
     catch (error) { toast(error.message); }
+  });
+  $('#pin-detail')?.addEventListener('click', async () => {
+    await setPinned(detail.card_id, !detail.pinned_at); await openThread(detail.thread_id);
   });
   $('#attach-to-selected')?.addEventListener('click', async () => {
     const target = $('#work-item-target').value; if (!target) return;
@@ -384,7 +420,6 @@ function bindGlobalEvents() {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('#global-search').focus(); }
     if (event.key === 'Escape' && $('#detail-drawer').classList.contains('open')) closeDrawer();
   });
-  $('#new-zone').addEventListener('click', () => showPrompt({ eyebrow: 'Board layout', title: 'Create a zone', label: 'Zone name', confirm: 'Create zone', onConfirm: async name => { await api('/api/zones', { method: 'POST', body: JSON.stringify({ name }) }); await loadState(); toast('Zone created'); } }));
   $('#new-work-item').addEventListener('click', () => showPrompt({ eyebrow: 'Group related work', title: 'Create a work item', label: 'Work item title', confirm: 'Create work item', onConfirm: async title => { await api('/api/work-items', { method: 'POST', body: JSON.stringify({ title }) }); await loadState(); toast('Work item added to Inbox'); } }));
   $('#prompt-form').addEventListener('submit', async event => {
     event.preventDefault();

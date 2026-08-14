@@ -170,6 +170,21 @@ class OrganizerTests(unittest.TestCase):
 
         self.assertEqual([card["thread_id"] for card in cards], ["zero-user-event"])
 
+    def test_board_is_newest_first_with_pinned_threads_above_inbox(self) -> None:
+        self.organizer.sync_catalog()
+        now = int(time.time())
+        self.add_thread("older", "Older thread", now + 1)
+        self.add_thread("newer", "Newer thread", now + 2)
+
+        cards = self.organizer.snapshot()["cards"]
+        self.assertEqual([card["thread_id"] for card in cards], ["newer", "older"])
+
+        pinned = self.organizer.update_card("older", {"pinned": True})
+        cards = self.organizer.snapshot()["cards"]
+
+        self.assertIsNotNone(pinned["pinned_at"])
+        self.assertEqual([card["thread_id"] for card in cards], ["older", "newer"])
+
     def test_legacy_null_thread_source_is_cataloged(self) -> None:
         self.add_thread("legacy-source", "An older saved thread", int(time.time()) - 10)
         native = sqlite3.connect(self.native_database)
@@ -217,7 +232,7 @@ class OrganizerTests(unittest.TestCase):
         self.assertEqual(result["workflow_status"], "waiting")
         self.assertEqual([tag["name"] for tag in result["tags"]], ["ERP", "follow-up"])
 
-    def test_dismissed_thread_can_be_restored_from_the_library(self) -> None:
+    def test_dismissed_thread_can_be_restored_from_all_threads(self) -> None:
         self.add_thread("dismissed", "A short-lived question", int(time.time()) - 10)
         self.organizer.sync_catalog()
         self.organizer.promote_thread("dismissed")
@@ -229,6 +244,17 @@ class OrganizerTests(unittest.TestCase):
 
         self.organizer.promote_thread("dismissed")
         self.assertEqual(self.organizer.snapshot()["cards"][0]["thread_id"], "dismissed")
+
+    def test_dismissing_a_thread_also_unpins_it(self) -> None:
+        self.add_thread("pinned", "Pinned work", int(time.time()) - 10)
+        self.organizer.sync_catalog()
+        self.organizer.promote_thread("pinned")
+        self.organizer.update_card("pinned", {"pinned": True})
+
+        dismissed = self.organizer.update_card("pinned", {"dismissed": True})
+
+        self.assertIsNone(dismissed["pinned_at"])
+        self.assertIsNotNone(dismissed["dismissed_at"])
 
     def test_detail_and_full_text_index_use_conversation_events(self) -> None:
         rollout = self.add_thread("searchable", "Migration planning", int(time.time()) - 10)
