@@ -83,6 +83,16 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .tag-filter-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .tag-filter { border: 1px solid var(--line); background: transparent; padding: 5px 8px; border-radius: 999px; color: var(--muted); cursor: pointer; font-size: 11px; }
 .tag-filter.active { color: var(--accent); border-color: rgba(216,255,120,.45); background: rgba(216,255,120,.08); }
+.project-filter-list { display: grid; gap: 5px; max-height: 180px; margin-top: 10px; overflow-y: auto; }
+.project-filter {
+  width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid transparent;
+  border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; text-align: left;
+}
+.project-filter:hover { background: var(--panel-raised); color: var(--text); }
+.project-filter.active { color: var(--accent); border-color: rgba(216,255,120,.3); background: rgba(216,255,120,.06); }
+.project-filter span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10px ui-monospace, monospace; }
+.project-filter small { color: var(--muted-2); font: 9px ui-monospace, monospace; }
 .muted { color: var(--muted-2); font-size: 12px; }
 
 .sidebar-footer { margin-top: auto; padding: 18px 9px 0; border-top: 1px solid var(--line); }
@@ -215,6 +225,10 @@ kbd { border: 1px solid var(--line); border-bottom-color: var(--line-bright); ba
 .drawer.open { transform: translateX(0); }
 .drawer-header { display: flex; align-items: center; justify-content: space-between; padding: 11px 18px; border-bottom: 1px solid var(--line); }
 .drawer-header-actions { display: flex; gap: 8px; }
+.save-state { align-self: center; color: var(--muted-2); font-size: 10px; min-width: 92px; text-align: right; }
+.save-state.saving { color: var(--amber); }
+.save-state.saved { color: var(--green); }
+.save-state.error { color: var(--red); }
 .icon-button { width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 9px; background: transparent; cursor: pointer; font-size: 20px; color: var(--muted); }
 .drawer-content { overflow-y: auto; padding: 30px 34px 80px; }
 .detail-eyebrow { display: flex; align-items: center; gap: 8px; color: var(--muted-2); font-size: 10px; text-transform: uppercase; letter-spacing: .11em; }

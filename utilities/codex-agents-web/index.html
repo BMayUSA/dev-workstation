@@ -49,6 +49,13 @@
           </label>
         </div>
 
+        <div class="sidebar-section projects-filter-section">
+          <div class="section-label">Projects</div>
+          <div id="project-filters" class="project-filter-list">
+            <span class="muted">No projects yet</span>
+          </div>
+        </div>
+
         <div class="sidebar-section tags-filter-section">
           <div class="section-label">Tags</div>
           <div id="tag-filters" class="tag-filter-list">
@@ -114,7 +121,7 @@
         <button class="icon-button" id="close-drawer" aria-label="Close details">×</button>
         <div class="drawer-header-actions">
           <button class="button quiet" id="copy-thread-id" hidden>Copy thread ID</button>
-          <button class="button primary" id="save-detail">Save</button>
+          <span class="save-state" id="auto-save-status" hidden>All changes saved</span>
         </div>
       </div>
       <div id="drawer-content" class="drawer-content"></div>

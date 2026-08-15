@@ -11,6 +11,6 @@ Link each utility from this directory to a location on your path. For example:
 - `delegator` creates Git worktrees and tmux sessions for parallel work.
 - `codex-agents` displays live Codex session and subagent lifecycle status.
   Run `codex-agents serve --open` for the local web workboard, which adds an
-  activity-sorted thread inbox, pinned threads, project labels, work items,
-  tags, notes, transcript search, and conversation details without modifying
-  Codex's own history database.
+  activity-sorted thread inbox, pinned threads, project filters, autosaved
+  details, work items, tags, notes, transcript search, and conversation details
+  without modifying Codex's own history database.

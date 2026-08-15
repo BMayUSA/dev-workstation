@@ -435,6 +435,15 @@ class Organizer:
             tags = [dict(row) for row in connection.execute(
                 "SELECT tag_id, name, color FROM organizer_tags ORDER BY name COLLATE NOCASE"
             )]
+            projects = [dict(row) for row in connection.execute(
+                """
+                SELECT cwd, COUNT(*) AS thread_count
+                FROM thread_catalog
+                WHERE parent_thread_id IS NULL AND cwd <> ''
+                GROUP BY cwd
+                ORDER BY cwd COLLATE NOCASE
+                """
+            )]
             where = "c.dismissed_at IS NULL"
             parameters: list[Any] = []
             if not show_completed:
@@ -469,6 +478,7 @@ class Organizer:
                 "zones": zones,
                 "cards": cards,
                 "tags": tags,
+                "projects": projects,
                 "statuses": STATUS_LABELS,
                 "counts": counts,
                 "sync": sync,
@@ -537,7 +547,9 @@ class Organizer:
         primary = min(states, key=lambda state: OPERATIONAL_PRIORITY.get(state, 99)) if states else "unknown"
         return {"state": primary, "states": states, "agents": agent_json}
 
-    def list_threads(self, query: str = "", limit: int = 100) -> list[dict[str, Any]]:
+    def list_threads(
+        self, query: str = "", limit: int = 100, cwd: str = ""
+    ) -> list[dict[str, Any]]:
         self.sync_catalog()
         connection = self.connect()
         try:
@@ -555,6 +567,9 @@ class Organizer:
 
             clauses = ["t.parent_thread_id IS NULL"]
             parameters: list[Any] = []
+            if cwd:
+                clauses.append("t.cwd = ?")
+                parameters.append(cwd)
             if query:
                 like = f"%{query}%"
                 metadata_clause = """
@@ -920,7 +935,9 @@ class OrganizerHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/threads":
                 query = parse_qs(parsed.query)
-                self.send_json({"threads": self.organizer.list_threads(query.get("q", [""])[0])})
+                self.send_json({"threads": self.organizer.list_threads(
+                    query.get("q", [""])[0], cwd=query.get("cwd", [""])[0]
+                )})
                 return
             if parsed.path.startswith("/api/threads/"):
                 thread_id = unquote(parsed.path.removeprefix("/api/threads/"))

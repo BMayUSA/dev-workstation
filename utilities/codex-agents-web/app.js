@@ -3,8 +3,11 @@ const state = {
   view: 'board',
   query: '',
   activeTag: '',
+  activeProject: '',
   status: '',
   activeDetail: null,
+  saveTimers: new Map(),
+  saveSequence: 0,
   refreshTimer: null,
 };
 
@@ -78,7 +81,7 @@ async function loadState({ quiet = false } = {}) {
 }
 
 function renderSidebar() {
-  const { cards, counts, tags, index } = state.snapshot;
+  const { cards, counts, tags, projects, index } = state.snapshot;
   $('#board-count').textContent = cards.length;
   $('#thread-count').textContent = counts.top_level || 0;
   const tagRoot = $('#tag-filters');
@@ -88,6 +91,17 @@ function renderSidebar() {
   $$('.tag-filter', tagRoot).forEach(button => button.addEventListener('click', () => {
     state.activeTag = state.activeTag === button.dataset.tag ? '' : button.dataset.tag;
     renderSidebar(); renderBoard();
+  }));
+  const projectRoot = $('#project-filters');
+  projectRoot.innerHTML = projects.length ? projects.map(project => `
+    <button class="project-filter ${state.activeProject === project.cwd ? 'active' : ''}" data-project="${escapeHtml(project.cwd)}" title="${escapeHtml(project.cwd)}">
+      <span>${escapeHtml(workspaceName(project.cwd))}</span><small>${project.thread_count}</small>
+    </button>
+  `).join('') : '<span class="muted">No projects yet</span>';
+  $$('.project-filter', projectRoot).forEach(button => button.addEventListener('click', () => {
+    state.activeProject = state.activeProject === button.dataset.project ? '' : button.dataset.project;
+    renderSidebar(); renderBoard();
+    if (state.view === 'threads') loadThreads();
   }));
   const indexed = index.total ? `${index.indexed}/${index.total}` : '0';
   $('#index-status').textContent = index.error ? 'Conversation index paused' :
@@ -100,6 +114,7 @@ function filteredCards() {
   return state.snapshot.cards.filter(card => {
     if (state.status && card.workflow_status !== state.status) return false;
     if (state.activeTag && !card.tags.some(tag => tag.name === state.activeTag)) return false;
+    if (state.activeProject && card.cwd !== state.activeProject) return false;
     if (!query) return true;
     return [card.title, card.preview, card.note, card.cwd, ...card.tags.map(tag => tag.name)]
       .some(value => String(value || '').toLowerCase().includes(query));
@@ -207,7 +222,9 @@ async function loadThreads() {
   const root = $('#thread-list');
   root.innerHTML = '<div class="empty-state">Searching local history…</div>';
   try {
-    const payload = await api(`/api/threads?q=${encodeURIComponent(state.query)}`);
+    const parameters = new URLSearchParams({ q: state.query });
+    if (state.activeProject) parameters.set('cwd', state.activeProject);
+    const payload = await api(`/api/threads?${parameters}`);
     root.innerHTML = payload.threads.length ? payload.threads.map(threadTemplate).join('') :
       '<div class="empty-state"><strong>No matching threads</strong>Try another title, phrase, or repository.</div>';
     $$('.thread-row', root).forEach(row => row.addEventListener('click', event => {
@@ -286,7 +303,8 @@ function cardFields(detail) {
 
 function renderCardDetail(detail) {
   $('#copy-thread-id').hidden = detail.card_type !== 'thread';
-  $('#save-detail').hidden = false;
+  const saveStatus = $('#auto-save-status');
+  saveStatus.hidden = false; saveStatus.textContent = 'All changes saved'; saveStatus.className = 'save-state saved';
   const operational = detail.operational?.state || 'unknown';
   const children = detail.card_type === 'work_item' ? `
     <section class="detail-section"><div class="detail-section-heading"><h3>Threads</h3><span class="muted">${detail.threads.length}</span></div>
@@ -304,8 +322,14 @@ function renderCardDetail(detail) {
 }
 
 function bindCardDetail(detail) {
-  $('#save-detail').onclick = () => saveActiveCard();
   $('#copy-thread-id').onclick = () => copyText(detail.thread_id, 'Thread ID copied');
+  $('#detail-title-input').addEventListener('input', event => {
+    $('.detail-title').textContent = event.target.value || detail.title;
+    scheduleCardSave();
+  });
+  $('#detail-tags').addEventListener('input', () => scheduleCardSave());
+  $('#detail-note').addEventListener('input', () => scheduleCardSave());
+  $('#detail-status').addEventListener('change', () => scheduleCardSave(0));
   $('#toggle-pin-card')?.addEventListener('click', async () => {
     await setPinned(detail.card_id, !detail.pinned_at); closeDrawer();
   });
@@ -326,23 +350,57 @@ function bindCardDetail(detail) {
   });
 }
 
-async function saveActiveCard() {
+function currentCardChanges() {
+  const title = $('#detail-title-input');
+  const tags = $('#detail-tags');
+  const note = $('#detail-note');
+  const status = $('#detail-status');
+  if (!title || !tags || !note || !status) return null;
+  return {
+    title_override: title.value.trim(),
+    note: note.value,
+    workflow_status: status.value,
+    tags: tags.value.split(',').map(value => value.trim()).filter(Boolean),
+  };
+}
+
+function scheduleCardSave(delay = 550) {
   const detail = state.activeDetail?.value;
-  if (!detail?.card_id) return;
-  const tags = $('#detail-tags').value.split(',').map(value => value.trim()).filter(Boolean);
+  const changes = currentCardChanges();
+  if (!detail?.card_id || !changes) return;
+  const cardId = detail.card_id;
+  const sequence = ++state.saveSequence;
+  const status = $('#auto-save-status');
+  status.hidden = false; status.textContent = 'Saving…'; status.className = 'save-state saving';
+  clearTimeout(state.saveTimers.get(cardId));
+  state.saveTimers.set(cardId, setTimeout(() => {
+    state.saveTimers.delete(cardId);
+    saveCardChanges(cardId, changes, sequence);
+  }, delay));
+}
+
+async function saveCardChanges(cardId, changes, sequence) {
   try {
-    const updated = await api(`/api/cards/${encodeURIComponent(detail.card_id)}`, {
-      method: 'PATCH', body: JSON.stringify({
-        title_override: $('#detail-title-input').value.trim(), note: $('#detail-note').value,
-        workflow_status: $('#detail-status').value, tags,
-      }),
+    const updated = await api(`/api/cards/${encodeURIComponent(cardId)}`, {
+      method: 'PATCH', body: JSON.stringify(changes),
     });
-    state.activeDetail = { kind: 'card', value: updated }; renderCardDetail(updated); await loadState({ quiet: true }); toast('Saved');
-  } catch (error) { toast(error.message); }
+    if (sequence !== state.saveSequence) return;
+    if (state.activeDetail?.kind === 'card' && state.activeDetail.value.card_id === cardId) {
+      state.activeDetail.value = updated;
+      const status = $('#auto-save-status');
+      status.hidden = false; status.textContent = 'All changes saved'; status.className = 'save-state saved';
+    }
+    await loadState({ quiet: true });
+  } catch (error) {
+    if (sequence !== state.saveSequence) return;
+    const status = $('#auto-save-status');
+    status.hidden = false; status.textContent = 'Could not save'; status.className = 'save-state error';
+    toast(error.message);
+  }
 }
 
 function renderThreadDetail(detail) {
-  $('#copy-thread-id').hidden = false; $('#save-detail').hidden = true;
+  $('#copy-thread-id').hidden = false; $('#auto-save-status').hidden = true;
   const operational = detail.operational?.state || 'unknown';
   const messages = detail.messages.map(message => `<article class="message ${message.role}"><div class="message-role">${message.role}</div><div class="message-text">${escapeHtml(message.text)}</div></article>`).join('');
   const tools = detail.tools.map(tool => `<details><summary>${escapeHtml(tool.name)}${tool.status ? ` · ${escapeHtml(tool.status)}` : ''}</summary><div class="tool-output">${escapeHtml(tool.input)}${tool.output ? `\n\nOutput\n${escapeHtml(tool.output)}` : ''}</div></details>`).join('');

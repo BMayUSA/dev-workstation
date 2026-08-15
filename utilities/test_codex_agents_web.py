@@ -69,6 +69,7 @@ class OrganizerTests(unittest.TestCase):
         title: str,
         created_at: int,
         parent_id: str | None = None,
+        cwd: str = "/tmp/example",
     ) -> Path:
         rollout = self.rollouts / f"{thread_id}.jsonl"
         records = [
@@ -98,13 +99,14 @@ class OrganizerTests(unittest.TestCase):
             INSERT INTO threads (
                 id, rollout_path, title, preview, cwd, model, source, thread_source,
                 created_at, updated_at, archived, has_user_event
-            ) VALUES (?, ?, ?, ?, '/tmp/example', 'gpt-test', 'cli', ?, ?, ?, 0, 0)
+            ) VALUES (?, ?, ?, ?, ?, 'gpt-test', 'cli', ?, ?, ?, 0, 0)
             """,
             (
                 thread_id,
                 str(rollout),
                 title,
                 f"Preview of {title}" if title else "",
+                cwd,
                 "subagent" if parent_id else "user",
                 created_at,
                 created_at,
@@ -184,6 +186,20 @@ class OrganizerTests(unittest.TestCase):
 
         self.assertIsNotNone(pinned["pinned_at"])
         self.assertEqual([card["thread_id"] for card in cards], ["older", "newer"])
+
+    def test_projects_are_counted_and_filter_all_threads_by_working_directory(self) -> None:
+        self.add_thread("config-one", "Config work", 1, cwd="/repos/config")
+        self.add_thread("config-two", "More config work", 2, cwd="/repos/config")
+        self.add_thread("erp-one", "ERP work", 3, cwd="/repos/champion-force")
+
+        snapshot = self.organizer.snapshot()
+        projects = {project["cwd"]: project["thread_count"] for project in snapshot["projects"]}
+        filtered = self.organizer.list_threads(cwd="/repos/config")
+
+        self.assertEqual(projects, {"/repos/champion-force": 1, "/repos/config": 2})
+        self.assertEqual(
+            [thread["thread_id"] for thread in filtered], ["config-two", "config-one"]
+        )
 
     def test_legacy_null_thread_source_is_cataloged(self) -> None:
         self.add_thread("legacy-source", "An older saved thread", int(time.time()) - 10)
