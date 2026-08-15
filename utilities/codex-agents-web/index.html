@@ -3,112 +3,73 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Codex Workboard</title>
+    <title>Codex Tasks</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
-          <div class="brand-mark" aria-hidden="true">C</div>
-          <div>
-            <h1>Workboard</h1>
-            <p>Local Codex organizer</p>
-          </div>
+          <div class="brand-mark" aria-hidden="true">✓</div>
+          <div><h1>Codex Tasks</h1><p>Work first. Threads when useful.</p></div>
         </div>
 
         <nav class="primary-nav" aria-label="Primary navigation">
-          <button class="nav-item active" data-view="board">
-            <span class="nav-icon">●</span>
-            Board
-            <span class="nav-count" id="board-count">0</span>
-          </button>
-          <button class="nav-item" data-view="threads">
-            <span class="nav-icon">☰</span>
-            All threads
-            <span class="nav-count" id="thread-count">0</span>
-          </button>
+          <button class="nav-item active" data-view="tasks"><span class="nav-icon">☷</span>My tasks<span class="nav-count" id="task-count">0</span></button>
+          <button class="nav-item" data-view="threads"><span class="nav-icon">⌁</span>Thread library<span class="nav-count" id="thread-count">0</span></button>
         </nav>
 
         <div class="sidebar-section">
-          <div class="section-label">Workflow</div>
-          <label class="filter-row">
-            <input type="checkbox" id="show-completed">
-            <span>Show completed</span>
-          </label>
-          <label class="field compact-field">
-            <span>Status</span>
-            <select id="status-filter">
-              <option value="">All statuses</option>
-              <option value="open">Open</option>
-              <option value="in_progress">In progress</option>
-              <option value="waiting">Waiting</option>
-              <option value="paused">Paused</option>
-              <option value="done">Done</option>
-            </select>
-          </label>
+          <div class="section-label">View</div>
+          <label class="filter-row"><input type="checkbox" id="show-completed"><span>Show completed tasks</span></label>
+          <label class="field compact-field"><span>Status</span><select id="status-filter">
+            <option value="">All active statuses</option><option value="open">Open</option><option value="in_progress">In progress</option>
+            <option value="waiting">Waiting</option><option value="paused">Paused</option><option value="done">Done</option>
+          </select></label>
         </div>
 
         <div class="sidebar-section projects-filter-section">
           <div class="section-label">Projects</div>
-          <div id="project-filters" class="project-filter-list">
-            <span class="muted">No projects yet</span>
-          </div>
+          <div id="project-filters" class="project-filter-list"><span class="muted">No projects yet</span></div>
         </div>
 
-        <div class="sidebar-section tags-filter-section">
-          <div class="section-label">Tags</div>
-          <div id="tag-filters" class="tag-filter-list">
-            <span class="muted">No tags yet</span>
-          </div>
+        <div class="sidebar-section labels-filter-section">
+          <div class="section-label">Labels</div>
+          <div id="label-filters" class="label-filter-list"><span class="muted">No labels yet</span></div>
         </div>
 
         <div class="sidebar-footer">
-          <div class="index-state">
-            <span class="pulse-dot"></span>
-            <span id="index-status">Preparing local search…</span>
-          </div>
-          <p>Codex data remains read-only.</p>
+          <div class="index-state"><span class="pulse-dot"></span><span id="index-status">Preparing thread search…</span></div>
+          <p>Codex history stays read-only.</p>
         </div>
       </aside>
 
       <main class="main-content">
         <header class="topbar">
-          <div class="search-wrap">
-            <span class="search-icon">⌕</span>
-            <input id="global-search" type="search" autocomplete="off"
-              placeholder="Search threads, notes, repositories, or conversation text…">
-            <kbd>⌘ K</kbd>
-          </div>
-          <div class="header-actions">
-            <button class="button secondary" id="new-work-item">+ Work item</button>
-          </div>
+          <div class="search-wrap"><span class="search-icon">⌕</span><input id="global-search" type="search" autocomplete="off" placeholder="Search tasks, labels, projects, or thread text…"><kbd>⌘ K</kbd></div>
+          <button class="button primary" id="new-task">+ New task</button>
         </header>
 
-        <section class="view active" id="board-view">
+        <section class="view active" id="tasks-view">
           <div class="view-heading">
-            <div>
-              <p class="eyebrow">Your working set</p>
-              <h2>Thread board</h2>
-            </div>
+            <div><p class="eyebrow">Your work</p><h2>Tasks</h2><p class="view-note">Keep the outcome here. Link Codex conversations whenever they become relevant.</p></div>
             <div class="live-summary" id="live-summary"></div>
           </div>
-          <p class="board-intro">New threads arrive here automatically. Pin the important ones or dismiss them to All threads.</p>
-          <div id="board" class="board" aria-live="polite"></div>
+          <form id="quick-add-form" class="quick-add">
+            <span class="task-checkbox ghost" aria-hidden="true"></span>
+            <input id="quick-add-title" placeholder="Add a task and press Enter…" autocomplete="off" required>
+            <select id="quick-add-project" aria-label="Project"><option value="">No project</option></select>
+            <button class="button secondary" type="submit">Add</button>
+          </form>
+          <div id="task-list" class="task-list" aria-live="polite"></div>
         </section>
 
         <section class="view" id="threads-view">
           <div class="view-heading">
-            <div>
-              <p class="eyebrow">Local Codex history</p>
-              <h2>All threads</h2>
-            </div>
-            <p class="view-note">Dismissed and historical threads remain searchable here.</p>
+            <div><p class="eyebrow">Codex history</p><h2>Thread library</h2><p class="view-note">Find any conversation, then turn it into a task or link it to one.</p></div>
           </div>
           <div class="thread-list-shell">
-            <div class="thread-list-header">
-              <span>Thread</span><span>Project / working directory</span><span>Updated</span><span></span>
-            </div>
+            <div class="thread-list-header"><span>Thread</span><span>Project</span><span>Updated</span><span>Task link</span></div>
             <div id="thread-list" class="thread-list"></div>
           </div>
         </section>
@@ -119,26 +80,17 @@
     <aside class="drawer" id="detail-drawer" aria-hidden="true">
       <div class="drawer-header">
         <button class="icon-button" id="close-drawer" aria-label="Close details">×</button>
-        <div class="drawer-header-actions">
-          <button class="button quiet" id="copy-thread-id" hidden>Copy thread ID</button>
-          <span class="save-state" id="auto-save-status" hidden>All changes saved</span>
-        </div>
+        <div class="drawer-header-actions"><button class="button quiet" id="copy-thread-id" hidden>Copy thread ID</button><span class="save-state" id="auto-save-status" hidden>All changes saved</span></div>
       </div>
       <div id="drawer-content" class="drawer-content"></div>
     </aside>
 
-    <dialog id="prompt-dialog">
-      <form method="dialog" id="prompt-form">
-        <p class="eyebrow" id="dialog-eyebrow">Create</p>
-        <h3 id="dialog-title">Add something</h3>
-        <label class="field">
-          <span id="dialog-label">Name</span>
-          <input id="dialog-input" required autocomplete="off">
-        </label>
-        <div class="dialog-actions">
-          <button class="button secondary" value="cancel">Cancel</button>
-          <button class="button primary" value="confirm" id="dialog-confirm">Create</button>
-        </div>
+    <dialog id="task-dialog">
+      <form method="dialog" id="task-form">
+        <p class="eyebrow">New task</p><h3>What needs doing?</h3>
+        <label class="field"><span>Task title</span><input id="task-title-input" required autocomplete="off" placeholder="A clear, finishable outcome"></label>
+        <label class="field dialog-project"><span>Project</span><select id="task-project-input"><option value="">No project</option></select></label>
+        <div class="dialog-actions"><button class="button secondary" type="button" id="cancel-task">Cancel</button><button class="button primary" value="confirm">Create task</button></div>
       </form>
     </dialog>
 

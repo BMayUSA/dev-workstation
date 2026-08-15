@@ -229,6 +229,56 @@ class OrganizerTests(unittest.TestCase):
         restored = self.organizer.snapshot()["cards"]
         self.assertEqual({card["card_type"] for card in restored}, {"thread", "work_item"})
 
+    def test_independent_task_can_keep_a_project_without_a_thread(self) -> None:
+        task = self.organizer.create_work_item(
+            "Prepare the rollout", project_cwd="/repos/champion-force"
+        )
+
+        self.assertEqual(task["cwd"], "/repos/champion-force")
+        self.assertEqual(task["threads"], [])
+        self.assertEqual(task["preview"], "No Codex threads linked yet.")
+        projects = self.organizer.snapshot()["projects"]
+        self.assertIn("/repos/champion-force", [project["cwd"] for project in projects])
+        self.assertEqual(projects[0]["task_count"], 1)
+
+    def test_thread_library_works_before_lifecycle_hooks_create_tables(self) -> None:
+        lifecycle = sqlite3.connect(self.organizer_database)
+        lifecycle.execute("DROP TABLE agents")
+        lifecycle.execute("DROP TABLE sessions")
+        lifecycle.commit()
+        lifecycle.close()
+        self.add_thread("first-run", "First run", 1)
+
+        threads = self.organizer.list_threads()
+
+        self.assertEqual(threads[0]["operational"]["state"], "unknown")
+
+    def test_any_task_can_link_additional_threads(self) -> None:
+        self.add_thread("primary", "Original conversation", 1, cwd="/repos/config")
+        self.add_thread("follow-up", "Follow-up conversation", 2, cwd="/repos/config")
+        self.organizer.sync_catalog()
+        self.organizer.promote_thread("primary")
+
+        task = self.organizer.attach_thread("primary", "follow-up")
+
+        self.assertEqual(
+            [thread["thread_id"] for thread in task["threads"]],
+            ["primary", "follow-up"],
+        )
+        self.assertTrue(task["threads"][0]["primary"])
+
+    def test_project_order_and_collapsed_state_are_persisted(self) -> None:
+        self.add_thread("config", "Config", 1, cwd="/repos/config")
+        self.add_thread("erp", "ERP", 2, cwd="/repos/erp")
+        self.organizer.sync_catalog()
+
+        self.organizer.reorder_projects(["/repos/erp", "/repos/config"])
+        self.organizer.update_project("/repos/erp", {"collapsed": True})
+        projects = self.organizer.snapshot()["projects"]
+
+        self.assertEqual([project["cwd"] for project in projects], ["/repos/erp", "/repos/config"])
+        self.assertEqual(projects[0]["collapsed"], 1)
+
     def test_card_annotations_and_tags_are_persisted(self) -> None:
         self.add_thread("annotated", "Needs a better title", int(time.time()) - 10)
         self.organizer.sync_catalog()

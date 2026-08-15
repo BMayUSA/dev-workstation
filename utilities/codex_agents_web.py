@@ -1,4 +1,4 @@
-"""Local web organizer for Codex threads and agent lifecycle state."""
+"""Local task organizer with optional links to Codex threads."""
 
 from __future__ import annotations
 
@@ -107,6 +107,7 @@ def initialize_organizer_schema(connection: sqlite3.Connection) -> None:
             note TEXT NOT NULL DEFAULT '',
             workflow_status TEXT NOT NULL DEFAULT 'open'
                 CHECK(workflow_status IN ('open','in_progress','waiting','paused','done')),
+            project_cwd TEXT NOT NULL DEFAULT '',
             zone_id INTEGER,
             position INTEGER NOT NULL DEFAULT 0,
             pinned_at REAL,
@@ -121,6 +122,12 @@ def initialize_organizer_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS organizer_cards_zone_idx
             ON organizer_cards(zone_id, position);
+
+        CREATE TABLE IF NOT EXISTS project_preferences (
+            cwd TEXT PRIMARY KEY,
+            position INTEGER NOT NULL DEFAULT 0,
+            collapsed INTEGER NOT NULL DEFAULT 0
+        );
 
         CREATE TABLE IF NOT EXISTS work_item_threads (
             work_item_id TEXT NOT NULL,
@@ -181,6 +188,10 @@ def initialize_organizer_schema(connection: sqlite3.Connection) -> None:
     }
     if "pinned_at" not in card_columns:
         connection.execute("ALTER TABLE organizer_cards ADD COLUMN pinned_at REAL")
+    if "project_cwd" not in card_columns:
+        connection.execute(
+            "ALTER TABLE organizer_cards ADD COLUMN project_cwd TEXT NOT NULL DEFAULT ''"
+        )
     connection.execute(
         """
         INSERT INTO zones (name, position, system_kind, created_at)
@@ -435,22 +446,37 @@ class Organizer:
             tags = [dict(row) for row in connection.execute(
                 "SELECT tag_id, name, color FROM organizer_tags ORDER BY name COLLATE NOCASE"
             )]
-            projects = [dict(row) for row in connection.execute(
+            project_rows = connection.execute(
                 """
-                SELECT cwd, COUNT(*) AS thread_count
-                FROM thread_catalog
-                WHERE parent_thread_id IS NULL AND cwd <> ''
-                GROUP BY cwd
-                ORDER BY cwd COLLATE NOCASE
+                WITH known_projects AS (
+                    SELECT cwd FROM thread_catalog
+                    WHERE parent_thread_id IS NULL AND cwd <> ''
+                    UNION
+                    SELECT project_cwd AS cwd FROM organizer_cards
+                    WHERE project_cwd <> ''
+                ), thread_counts AS (
+                    SELECT cwd, COUNT(*) AS thread_count
+                    FROM thread_catalog
+                    WHERE parent_thread_id IS NULL AND cwd <> ''
+                    GROUP BY cwd
+                )
+                SELECT p.cwd, COALESCE(t.thread_count, 0) AS thread_count,
+                       COALESCE(pref.position, 2147483647) AS position,
+                       COALESCE(pref.collapsed, 0) AS collapsed
+                FROM known_projects p
+                LEFT JOIN thread_counts t ON t.cwd = p.cwd
+                LEFT JOIN project_preferences pref ON pref.cwd = p.cwd
+                ORDER BY position, p.cwd COLLATE NOCASE
                 """
-            )]
+            ).fetchall()
+            projects = [dict(row) for row in project_rows]
             where = "c.dismissed_at IS NULL"
             parameters: list[Any] = []
             if not show_completed:
                 where += " AND c.workflow_status <> 'done'"
             rows = connection.execute(
                 f"""
-                SELECT c.*, t.native_title, t.preview, t.cwd, t.model,
+                SELECT c.*, t.native_title, t.preview, t.cwd AS primary_cwd, t.model,
                        t.updated_at AS thread_updated_at
                 FROM organizer_cards c
                 LEFT JOIN thread_catalog t ON t.thread_id = c.thread_id
@@ -466,6 +492,12 @@ class Organizer:
                 parameters,
             ).fetchall()
             cards = [self._card_json(connection, row) for row in rows]
+            task_counts: dict[str, int] = {}
+            for card in cards:
+                if card["cwd"]:
+                    task_counts[card["cwd"]] = task_counts.get(card["cwd"], 0) + 1
+            for project in projects:
+                project["task_count"] = task_counts.get(project["cwd"], 0)
             counts = dict(connection.execute(
                 """
                 SELECT
@@ -498,32 +530,47 @@ class Organizer:
             """,
             (card["card_id"],),
         )]
-        if card["card_type"] == "work_item":
-            children = connection.execute(
-                """
-                SELECT t.thread_id, t.native_title, t.preview, t.cwd, t.updated_at
-                FROM work_item_threads w
-                JOIN thread_catalog t ON t.thread_id = w.thread_id
-                WHERE w.work_item_id = ? ORDER BY w.position, t.updated_at DESC
-                """,
-                (card["card_id"],),
-            ).fetchall()
-            card["threads"] = [dict(child) for child in children]
-            states = [self._operational_for(connection, child["thread_id"]) for child in children]
-            card["operational"] = aggregate_operational(states)
-            card["preview"] = card["note"] or (
-                children[0]["preview"] if children else "No threads attached yet."
-            )
-            card["cwd"] = children[0]["cwd"] if children else ""
-            card["thread_updated_at"] = max(
-                (child["updated_at"] for child in children), default=card["updated_at"]
-            )
-        else:
-            card["threads"] = []
-            card["operational"] = self._operational_for(connection, card["thread_id"])
+        linked = [dict(child) for child in connection.execute(
+            """
+            SELECT t.thread_id, t.native_title, t.preview, t.cwd, t.updated_at
+            FROM work_item_threads w
+            JOIN thread_catalog t ON t.thread_id = w.thread_id
+            WHERE w.work_item_id = ? ORDER BY w.position, t.updated_at DESC
+            """,
+            (card["card_id"],),
+        )]
+        primary = []
+        if card.get("thread_id"):
+            primary = [{
+                "thread_id": card["thread_id"],
+                "native_title": card.get("native_title") or "Untitled thread",
+                "preview": card.get("preview") or "",
+                "cwd": card.get("primary_cwd") or "",
+                "updated_at": card.get("thread_updated_at") or card["updated_at"],
+                "primary": True,
+            }]
+        card["threads"] = primary + linked
+        states = [self._operational_for(connection, thread["thread_id"]) for thread in card["threads"]]
+        card["operational"] = aggregate_operational(states)
+        card["preview"] = card["note"] or (
+            card["threads"][0]["preview"] if card["threads"] else "No Codex threads linked yet."
+        )
+        inferred_cwd = next((thread["cwd"] for thread in card["threads"] if thread["cwd"]), "")
+        card["cwd"] = card.get("project_cwd") or inferred_cwd
+        card["thread_updated_at"] = max(
+            (thread["updated_at"] for thread in card["threads"]), default=card["updated_at"]
+        )
         return card
 
     def _operational_for(self, connection: sqlite3.Connection, thread_id: str) -> dict[str, Any]:
+        lifecycle_tables = connection.execute(
+            """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table' AND name IN ('sessions', 'agents')
+            """
+        ).fetchone()[0]
+        if lifecycle_tables < 2:
+            return {"state": "unknown", "states": [], "agents": []}
         session = connection.execute(
             "SELECT state, updated_at, last_event FROM sessions WHERE session_id = ?",
             (thread_id,),
@@ -643,7 +690,7 @@ class Organizer:
         try:
             row = connection.execute(
                 """
-                SELECT c.*, t.native_title, t.preview, t.cwd, t.model,
+                SELECT c.*, t.native_title, t.preview, t.cwd AS primary_cwd, t.model,
                        t.updated_at AS thread_updated_at
                 FROM organizer_cards c
                 LEFT JOIN thread_catalog t ON t.thread_id = c.thread_id
@@ -673,10 +720,12 @@ class Organizer:
         finally:
             connection.close()
 
-    def create_work_item(self, title: str, zone_id: int | None = None) -> dict[str, Any]:
+    def create_work_item(
+        self, title: str, zone_id: int | None = None, project_cwd: str = ""
+    ) -> dict[str, Any]:
         title = title.strip()
         if not title:
-            raise ValueError("Work item title is required")
+            raise ValueError("Task title is required")
         connection = self.connect()
         try:
             if zone_id is None:
@@ -689,11 +738,11 @@ class Organizer:
                 connection.execute(
                     """
                     INSERT INTO organizer_cards (
-                        card_id, card_type, title_override, zone_id, position,
+                        card_id, card_type, title_override, project_cwd, zone_id, position,
                         created_at, updated_at
-                    ) VALUES (?, 'work_item', ?, ?, ?, ?, ?)
+                    ) VALUES (?, 'work_item', ?, ?, ?, ?, ?, ?)
                     """,
-                    (card_id, title, zone_id, int(now * 1000), now, now),
+                    (card_id, title, project_cwd.strip(), zone_id, int(now * 1000), now, now),
                 )
             return self.card_detail(card_id)
         finally:
@@ -730,7 +779,7 @@ class Organizer:
 
     def update_card(self, card_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         allowed = {
-            "title_override", "note", "workflow_status", "zone_id", "position",
+            "title_override", "note", "workflow_status", "project_cwd", "zone_id", "position",
             "pinned", "dismissed",
         }
         unknown = set(changes) - allowed - {"tags"}
@@ -740,7 +789,9 @@ class Organizer:
             raise ValueError("Invalid workflow status")
         assignments: list[str] = []
         parameters: list[Any] = []
-        for field in ("title_override", "note", "workflow_status", "zone_id", "position"):
+        for field in (
+            "title_override", "note", "workflow_status", "project_cwd", "zone_id", "position"
+        ):
             if field in changes:
                 assignments.append(f"{field} = ?")
                 parameters.append(changes[field])
@@ -788,14 +839,16 @@ class Organizer:
         connection = self.connect()
         try:
             work_item = connection.execute(
-                "SELECT 1 FROM organizer_cards WHERE card_id = ? AND card_type = 'work_item'",
+                "SELECT thread_id FROM organizer_cards WHERE card_id = ?",
                 (work_item_id,),
             ).fetchone()
             thread = connection.execute(
                 "SELECT 1 FROM thread_catalog WHERE thread_id = ?", (thread_id,),
             ).fetchone()
             if not work_item or not thread:
-                raise KeyError("Work item or thread not found")
+                raise KeyError("Task or thread not found")
+            if work_item["thread_id"] == thread_id:
+                raise ValueError("That thread already starts this task")
             with connection:
                 connection.execute("DELETE FROM work_item_threads WHERE thread_id = ?", (thread_id,))
                 position = connection.execute(
@@ -807,6 +860,57 @@ class Organizer:
                     (work_item_id, thread_id, position),
                 )
             return self.card_detail(work_item_id)
+        finally:
+            connection.close()
+
+    def update_project(self, cwd: str, changes: dict[str, Any]) -> dict[str, Any]:
+        cwd = cwd.strip()
+        if not cwd:
+            raise ValueError("Project working directory is required")
+        unknown = set(changes) - {"position", "collapsed"}
+        if unknown:
+            raise ValueError(f"Unsupported fields: {', '.join(sorted(unknown))}")
+        connection = self.connect()
+        try:
+            current = connection.execute(
+                "SELECT position, collapsed FROM project_preferences WHERE cwd = ?", (cwd,)
+            ).fetchone()
+            position = int(
+                changes.get("position", current["position"] if current else 2147483647)
+            )
+            collapsed = int(bool(changes.get("collapsed", current["collapsed"] if current else False)))
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO project_preferences (cwd, position, collapsed)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(cwd) DO UPDATE SET
+                        position = excluded.position,
+                        collapsed = excluded.collapsed
+                    """,
+                    (cwd, position, collapsed),
+                )
+            return {"cwd": cwd, "position": position, "collapsed": collapsed}
+        finally:
+            connection.close()
+
+    def reorder_projects(self, projects: Any) -> list[dict[str, Any]]:
+        if not isinstance(projects, list) or not all(isinstance(cwd, str) for cwd in projects):
+            raise ValueError("Projects must be a list of working directories")
+        clean = list(dict.fromkeys(cwd.strip() for cwd in projects if cwd.strip()))
+        connection = self.connect()
+        try:
+            with connection:
+                for position, cwd in enumerate(clean):
+                    connection.execute(
+                        """
+                        INSERT INTO project_preferences (cwd, position, collapsed)
+                        VALUES (?, ?, 0)
+                        ON CONFLICT(cwd) DO UPDATE SET position = excluded.position
+                        """,
+                        (cwd, position),
+                    )
+            return [{"cwd": cwd, "position": position} for position, cwd in enumerate(clean)]
         finally:
             connection.close()
 
@@ -962,13 +1066,29 @@ class OrganizerHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/work-items":
                 self.send_json(self.organizer.create_work_item(
-                    str(body.get("title", "")), body.get("zone_id")
+                    str(body.get("title", "")), body.get("zone_id"),
+                    str(body.get("project_cwd", ""))
                 ), HTTPStatus.CREATED)
+                return
+            if parsed.path == "/api/tasks":
+                self.send_json(self.organizer.create_work_item(
+                    str(body.get("title", "")), body.get("zone_id"),
+                    str(body.get("project_cwd", ""))
+                ), HTTPStatus.CREATED)
+                return
+            if parsed.path == "/api/projects/reorder":
+                self.send_json(self.organizer.reorder_projects(body.get("projects")))
                 return
             if parsed.path == "/api/cards/thread":
                 self.send_json(self.organizer.promote_thread(str(body.get("thread_id", ""))))
                 return
             match = re.fullmatch(r"/api/work-items/([^/]+)/threads", parsed.path)
+            if match:
+                self.send_json(self.organizer.attach_thread(
+                    unquote(match.group(1)), str(body.get("thread_id", ""))
+                ))
+                return
+            match = re.fullmatch(r"/api/tasks/([^/]+)/threads", parsed.path)
             if match:
                 self.send_json(self.organizer.attach_thread(
                     unquote(match.group(1)), str(body.get("thread_id", ""))
@@ -989,6 +1109,11 @@ class OrganizerHandler(BaseHTTPRequestHandler):
                 card_id = unquote(parsed.path.removeprefix("/api/cards/"))
                 self.send_json(self.organizer.update_card(card_id, self.read_json()))
                 return
+            if parsed.path == "/api/projects":
+                body = self.read_json()
+                cwd = str(body.pop("cwd", ""))
+                self.send_json(self.organizer.update_project(cwd, body))
+                return
             self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except (ValueError, sqlite3.IntegrityError) as error:
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
@@ -1000,7 +1125,9 @@ class OrganizerHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         match = re.fullmatch(r"/api/work-items/([^/]+)/threads/([^/]+)", parsed.path)
+        task_match = re.fullmatch(r"/api/tasks/([^/]+)/threads/([^/]+)", parsed.path)
         try:
+            match = task_match or match
             if match:
                 self.send_json(self.organizer.detach_thread(
                     unquote(match.group(1)), unquote(match.group(2))
@@ -1055,7 +1182,7 @@ def serve(database_path: Path, host: str, port: int, open_browser: bool = False)
     handler = type("BoundOrganizerHandler", (OrganizerHandler,), {"organizer": organizer})
     server = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{server.server_port}"
-    print(f"Codex Workboard is available at {url}")
+    print(f"Codex Tasks is available at {url}")
     print(f"Organizer database: {database_path}")
     print("Press Ctrl-C to stop.")
     if open_browser:
@@ -1063,7 +1190,7 @@ def serve(database_path: Path, host: str, port: int, open_browser: bool = False)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopping Codex Workboard.")
+        print("\nStopping Codex Tasks.")
     finally:
         server.server_close()
     return 0
