@@ -53,7 +53,6 @@ path=(
   "$HOME/.local/bin"
   "$HOME/tools"
   "$ANDROID_HOME/emulator"
-  "$ANDROID_HOME/platform-tools"
   "/Applications/Docker.app/Contents/Resources/bin"
   $path
 )
