@@ -322,17 +322,11 @@ tmux set-option -t "$session_name" \
 tmux set-option -t "$session_name" pane-active-border-style "fg=$color"
 tmux set -t "$session_name" status-style "bg=$color,fg=black"
 
-printf -v pane_one_command \
-  'printf "Welcome\!\\nBranch: %%s\\n" %q' "$branch"
-
 if [[ -n $prompt ]]; then
   printf -v pane_two_command 'codex exec -- %q' "$prompt"
 else
   pane_two_command=codex
 fi
-
-tmux send-keys -t "$pane_one_id" -l "$pane_one_command"
-tmux send-keys -t "$pane_one_id" Enter
 
 tmux send-keys -t "$pane_two_id" -l "$pane_two_command"
 tmux send-keys -t "$pane_two_id" Enter
